@@ -30,6 +30,15 @@ class Pipeline {
     std::string map_frame = "map";
     std::string body_frame = "body";
     std::string log_path = "";
+    // When non-empty, saveMap() writes the accumulated map here: "<path>.pcd" (binary
+    // point cloud) and "<path>.bumpmap" (native voxel dump). See BIEVRMap::exportMap.
+    std::string map_save_path = "";
+    // When non-empty, saveAccumulatedMap() writes the union of per-scan registered
+    // clouds (world frame, real LiDAR intensity), voxel-downsampled, to "<path>.pcd".
+    std::string accumulated_map_save_path = "";
+    // Voxel leaf size (m) used to downsample the accumulated raw map. <= 0 keeps
+    // every point (no downsample).
+    double accumulated_map_leaf_m = 0.05;
 
     size_t min_points_for_map_init = 100;
     size_t map_size_running_threshold = 5;
@@ -55,6 +64,16 @@ class Pipeline {
     };
     publishers_[typeid(T)] = wrapper;
   }
+
+  // Writes the accumulated map to config_.map_save_path (".pcd" + ".bumpmap");
+  // no-op if the path is empty. Safe to call after the bag/stream has finished.
+  void saveMap() const;
+
+  // Writes the accumulated raw LiDAR map (voxel-downsampled union of per-scan
+  // registered clouds, real intensity) to config_.accumulated_map_save_path +
+  // ".pcd"; no-op if the path is empty. Safe to call after the bag/stream has
+  // finished.
+  void saveAccumulatedMap() const;
 
  private:
   enum class Phase { NeedBias, NeedMap, Running };
@@ -97,6 +116,10 @@ class Pipeline {
   // Logging
   void logTUM(double timestamp, const Transform& pose);
 
+  // Packs three signed voxel indices (21 bits each) into one int64 key for
+  // accum_map_.
+  static int64_t accumKey(int ix, int iy, int iz);
+
   Config config_;
   std::map<uint64_t, State> states_;
   std::map<uint64_t, ImuIntegratorPtr> imu_integrators_;
@@ -118,6 +141,14 @@ class Pipeline {
       std::function<void(const void*, const Header&, const std::string&, const std::string&)>;
   std::unordered_map<std::type_index, PublishFunction> publishers_;
   std::shared_ptr<std::ofstream> tum_log_;
+
+  struct AccumCell {
+    double sx = 0, sy = 0, sz = 0, si = 0;
+    uint32_t n = 0;
+  };
+  // Voxel-grid accumulator for the raw registered map (running mean per cell).
+  // Populated in publishFrame when config_.accumulated_map_save_path is set.
+  ankerl::unordered_dense::map<int64_t, AccumCell> accum_map_;
 
   // Accumulated state for the live status dashboard (printDashboard in utils).
   DashboardState dashboard_;

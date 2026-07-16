@@ -1,5 +1,7 @@
 #include "bievr_lio/pipeline.h"
 
+#include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 
@@ -344,6 +346,26 @@ void Pipeline::publishFrame(const Header& header, const Transform& T_W_I,
                             const Pointcloud& full_registered, const Pointcloud& source_filtered,
                             const Pointcloud& source_coarse, const Pointcloud& source_fine,
                             const Pointcloud& undistorted, const IntensityView& intensities) {
+  if (!config_.accumulated_map_save_path.empty()) {
+    const double leaf = config_.accumulated_map_leaf_m;
+    for (size_t i = 0; i < full_registered.size(); ++i) {
+      const Point& p = full_registered[i];
+      const double inten = intensities(i);
+      if (leaf > 0.0) {
+        const double inv = 1.0 / leaf;
+        int ix = static_cast<int>(std::floor(p.x() * inv));
+        int iy = static_cast<int>(std::floor(p.y() * inv));
+        int iz = static_cast<int>(std::floor(p.z() * inv));
+        AccumCell& c = accum_map_[accumKey(ix, iy, iz)];
+        c.sx += p.x(); c.sy += p.y(); c.sz += p.z(); c.si += inten; c.n += 1;
+      } else {
+        // leaf<=0: keep every point (store as a 1-count cell keyed by running index)
+        AccumCell& c = accum_map_[static_cast<int64_t>(accum_map_.size())];
+        c.sx = p.x(); c.sy = p.y(); c.sz = p.z(); c.si = inten; c.n = 1;
+      }
+    }
+  }
+
   if (config_.publish_all_clouds) {
     publishDebugClouds(source_filtered, source_coarse, source_fine, undistorted, intensities, T_W_I,
                        header);
@@ -387,6 +409,51 @@ void Pipeline::publishDebugClouds(const Pointcloud& source_filtered,
   // The undistorted cloud keeps its original point order, so the snapshotted
   // intensity row still lines up with it.
   publish(IntensityPointcloud(undistorted_cloud, intensities), body_header, "points/undistorted");
+}
+
+void Pipeline::saveMap() const {
+  if (config_.map_save_path.empty()) return;
+  if (!map_ || map_->size() == 0) {
+    LOG(W, "saveMap: map is empty, nothing to write.");
+    return;
+  }
+  const std::string pcd = config_.map_save_path + ".pcd";
+  const std::string native = config_.map_save_path + ".bumpmap";
+  LOG(I, "Saving map (" << map_->size() << " voxels) -> " << pcd << " (+ " << native << ")");
+  map_->exportMap(pcd, native);
+}
+
+int64_t Pipeline::accumKey(int ix, int iy, int iz) {
+  auto e = [](int v) { return static_cast<int64_t>(v) & 0x1FFFFF; };  // 21 bits
+  return (e(ix) << 42) | (e(iy) << 21) | e(iz);
+}
+
+void Pipeline::saveAccumulatedMap() const {
+  if (config_.accumulated_map_save_path.empty()) return;
+  if (accum_map_.empty()) {
+    LOG(W, "saveAccumulatedMap: nothing accumulated.");
+    return;
+  }
+  const std::string pcd = config_.accumulated_map_save_path + ".pcd";
+  LOG(I, "Saving accumulated LiDAR map (" << accum_map_.size() << " points, leaf "
+                                          << config_.accumulated_map_leaf_m << " m) -> " << pcd);
+  std::ofstream f(pcd, std::ios::binary | std::ios::trunc);
+  if (!f.is_open()) {
+    LOG(E, "saveAccumulatedMap: cannot open " << pcd);
+    return;
+  }
+  const size_t n = accum_map_.size();
+  f << "# .PCD v0.7 - BIEVR-LIO accumulated LiDAR map\n"
+    << "VERSION 0.7\nFIELDS x y z intensity\nSIZE 4 4 4 4\nTYPE F F F F\n"
+    << "COUNT 1 1 1 1\nWIDTH " << n << "\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\n"
+    << "POINTS " << n << "\nDATA binary\n";
+  for (const auto& kv : accum_map_) {
+    const AccumCell& c = kv.second;
+    const double inv = 1.0 / static_cast<double>(c.n);
+    float buf[4] = {static_cast<float>(c.sx * inv), static_cast<float>(c.sy * inv),
+                    static_cast<float>(c.sz * inv), static_cast<float>(c.si * inv)};
+    f.write(reinterpret_cast<const char*>(buf), sizeof(buf));
+  }
 }
 
 void Pipeline::logTUM(double timestamp, const Transform& pose) {

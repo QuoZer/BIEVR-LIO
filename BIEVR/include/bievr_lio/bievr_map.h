@@ -4,7 +4,9 @@
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_sort.h>
 
+#include <fstream>
 #include <list>
+#include <string>
 
 #include "bievr_lio/common.h"
 #include "unordered_dense/unordered_dense.h"
@@ -51,6 +53,13 @@ class BIEVRMap {
   Eigen::Vector3i getVoxelIdx(const Point& point) const;
   const Voxel* getVoxel(const size_t hash_idx) const;
   bool nearestVoxel(const Point& point, size_t& result) const;
+
+  // Export the current map to disk. `pcd_path` gets a binary PCD point cloud
+  // reconstructed from every observed voxel's bump image (one point per valid
+  // pixel, intensity = pixel weight); `native_path` gets a binary dump of the
+  // raw voxels (oriented pose + bump-image / weight matrices) in BIEVR's native
+  // representation. Returns the number of points written to the PCD.
+  size_t exportMap(const std::string& pcd_path, const std::string& native_path) const;
 
   const double& voxel_size = config_.voxel_size;
   const double& pixel_size = config_.px_size;

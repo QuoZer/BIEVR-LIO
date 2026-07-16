@@ -100,6 +100,9 @@ int main(int argc, char** argv) {
   reader.close();
   LOG(I, "Bag closed");
 
+  pipeline->saveMap();
+  pipeline->saveAccumulatedMap();
+
   rclcpp::shutdown();
   return 0;
 }

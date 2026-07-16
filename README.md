@@ -27,6 +27,9 @@ BIEVR-LIO is a robust LiDAR-Inertial Odometry framework that uses a high-resolut
 voxel-wise oriented height image map to exploit subtle geometric variations in
 challenging, information-sparse environments.
 
+### Fork changes:
+- map saving in pcd and bumpmap formats 
+
 <details>
 <summary><b>Abstract</b></summary>
 <br>

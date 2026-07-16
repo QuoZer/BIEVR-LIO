@@ -3,6 +3,8 @@
 #include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <fstream>
 #include <utility>
 #include <vector>
 
@@ -417,6 +419,130 @@ Eigen::Vector3d BIEVRMap::getVoxelOrigin(const Eigen::Vector3d& point) const {
   int hy = static_cast<int>(std::floor(point.y() * inv_voxel_size_));
   int hz = static_cast<int>(std::floor(point.z() * inv_voxel_size_));
   return Eigen::Vector3d(hx * config_.voxel_size, hy * config_.voxel_size, hz * config_.voxel_size);
+}
+
+size_t BIEVRMap::exportMap(const std::string& pcd_path, const std::string& native_path) const {
+  // --- Pass 1: count valid pixels across all observed voxels (needed up front so the
+  // PCD header's WIDTH/POINTS fields are correct without buffering all points in RAM). ---
+  size_t n_points = 0;
+  size_t n_voxels = 0;
+  for (const auto& kv : map_) {
+    const Voxel& voxel = kv.second.voxel;
+    if (!voxel.observed_ || voxel.bump_weights_.size() == 0) continue;
+    n_voxels++;
+    for (int i = 0; i < voxel.bump_weights_.rows(); ++i) {
+      for (int j = 0; j < voxel.bump_weights_.cols(); ++j) {
+        if (voxel.bump_weights_(i, j) > 0) n_points++;
+      }
+    }
+  }
+
+  // --- Pass 2: stream the binary PCD. ---
+  {
+    std::ofstream pcd(pcd_path, std::ios::binary | std::ios::trunc);
+    if (!pcd.is_open()) {
+      LOG(E, "exportMap: could not open '" << pcd_path << "' for writing.");
+      return 0;
+    }
+    pcd << "# .PCD v0.7 - BIEVR-LIO map export\n";
+    pcd << "VERSION 0.7\n";
+    pcd << "FIELDS x y z intensity\n";
+    pcd << "SIZE 4 4 4 4\n";
+    pcd << "TYPE F F F F\n";
+    pcd << "COUNT 1 1 1 1\n";
+    pcd << "WIDTH " << n_points << "\n";
+    pcd << "HEIGHT 1\n";
+    pcd << "VIEWPOINT 0 0 0 1 0 0 0\n";
+    pcd << "POINTS " << n_points << "\n";
+    pcd << "DATA binary\n";
+
+    for (const auto& kv : map_) {
+      const Voxel& voxel = kv.second.voxel;
+      if (!voxel.observed_ || voxel.bump_weights_.size() == 0) continue;
+      const Transform T_W_C = voxel.T_C_W_.inverse();
+      for (int i = 0; i < voxel.bump_img_.rows(); ++i) {
+        for (int j = 0; j < voxel.bump_img_.cols(); ++j) {
+          const float w = voxel.bump_weights_(i, j);
+          if (w <= 0) continue;
+          const Point p_C(j * config_.px_size, i * config_.px_size, voxel.bump_img_(i, j));
+          const Point p_W = T_W_C * p_C;
+          const float xyz_w[4] = {static_cast<float>(p_W(0)), static_cast<float>(p_W(1)),
+                                  static_cast<float>(p_W(2)), w};
+          pcd.write(reinterpret_cast<const char*>(xyz_w), sizeof(xyz_w));
+        }
+      }
+    }
+  }
+
+  // --- Native bump-map dump: raw voxels (pose + bump-image / weight matrices). ---
+  {
+    std::ofstream native(native_path, std::ios::binary | std::ios::trunc);
+    if (!native.is_open()) {
+      LOG(E, "exportMap: could not open '" << native_path << "' for writing.");
+      return n_points;
+    }
+    const char magic[8] = {'B', 'I', 'E', 'V', 'R', 'M', 'P', '\0'};
+    native.write(magic, sizeof(magic));
+    const uint32_t version = 1;
+    native.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    const double voxel_size = config_.voxel_size;
+    const double px_size = config_.px_size;
+    native.write(reinterpret_cast<const char*>(&voxel_size), sizeof(voxel_size));
+    native.write(reinterpret_cast<const char*>(&px_size), sizeof(px_size));
+    const uint64_t n_voxels_u64 = static_cast<uint64_t>(n_voxels);
+    native.write(reinterpret_cast<const char*>(&n_voxels_u64), sizeof(n_voxels_u64));
+
+    for (const auto& kv : map_) {
+      const Voxel& voxel = kv.second.voxel;
+      if (!voxel.observed_ || voxel.bump_weights_.size() == 0) continue;
+
+      double T_C_W[12];
+      double T_O_W[12];
+      const auto T_C_W_mat = voxel.T_C_W_.matrix();
+      const auto T_O_W_mat = voxel.T_O_W_.matrix();
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+          T_C_W[r * 4 + c] = T_C_W_mat(r, c);
+          T_O_W[r * 4 + c] = T_O_W_mat(r, c);
+        }
+      }
+      native.write(reinterpret_cast<const char*>(T_C_W), sizeof(T_C_W));
+      native.write(reinterpret_cast<const char*>(T_O_W), sizeof(T_O_W));
+
+      const V3 centroid = voxel.sum_ / static_cast<double>(voxel.num_points_);
+      double centroid_arr[3] = {centroid(0), centroid(1), centroid(2)};
+      native.write(reinterpret_cast<const char*>(centroid_arr), sizeof(centroid_arr));
+
+      const Eigen::Vector3d normal = voxel.T_O_W_.linear().row(2);
+      double normal_arr[3] = {normal(0), normal(1), normal(2)};
+      native.write(reinterpret_cast<const char*>(normal_arr), sizeof(normal_arr));
+
+      const uint64_t num_points = static_cast<uint64_t>(voxel.num_points_);
+      native.write(reinterpret_cast<const char*>(&num_points), sizeof(num_points));
+
+      const int32_t rows = static_cast<int32_t>(voxel.bump_img_.rows());
+      const int32_t cols = static_cast<int32_t>(voxel.bump_img_.cols());
+      native.write(reinterpret_cast<const char*>(&rows), sizeof(rows));
+      native.write(reinterpret_cast<const char*>(&cols), sizeof(cols));
+
+      std::vector<float> row_major_img(static_cast<size_t>(rows) * cols);
+      std::vector<float> row_major_weights(static_cast<size_t>(rows) * cols);
+      for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+          row_major_img[static_cast<size_t>(i) * cols + j] = voxel.bump_img_(i, j);
+          row_major_weights[static_cast<size_t>(i) * cols + j] = voxel.bump_weights_(i, j);
+        }
+      }
+      native.write(reinterpret_cast<const char*>(row_major_img.data()),
+                   static_cast<std::streamsize>(row_major_img.size() * sizeof(float)));
+      native.write(reinterpret_cast<const char*>(row_major_weights.data()),
+                   static_cast<std::streamsize>(row_major_weights.size() * sizeof(float)));
+    }
+  }
+
+  LOG(I, "exportMap: wrote " << n_voxels << " voxels / " << n_points << " points -> " << pcd_path
+                             << " (+ " << native_path << ")");
+  return n_points;
 }
 
 bool BIEVRMap::nearestVoxel(const Eigen::Vector3d& point, size_t& result) const {
