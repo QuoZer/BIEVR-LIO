@@ -156,6 +156,12 @@ inline void printConfigOverview(const Config& config) {
   os << "  smooth:               " << yn(hc.map.smooth) << "\n";
   os << "  weighted:             " << yn(hc.map.weighted) << "\n";
   os << "  frame:                " << hc.map_frame << "\n";
+  os << "  load_path:            " << (hc.map_load_path.empty() ? "<none>" : hc.map_load_path)
+     << "\n";
+  os << "  update:               " << yn(hc.map_update) << "\n";
+  if (hc.has_initial_pose) {
+    printExtrinsic(os, "initial_pose", hc.initial_pose);
+  }
   os << "preprocess:\n";
   os << "  downsample_res_m:     " << hc.preprocess.downsample_resolution << "\n";
   os << "  informed_sampling:    " << yn(hc.preprocess.informed_sampling) << "\n";
@@ -185,6 +191,9 @@ inline void printConfigOverview(const Config& config) {
   if (!hc.accumulated_map_save_path.empty()) {
     os << "  accumulated_map_leaf_m:    " << hc.accumulated_map_leaf_m << "\n";
   }
+  os << "  publish_map_stride:   " << (hc.publish_map_stride ? std::to_string(hc.publish_map_stride)
+                                                             : std::string("off"))
+     << "\n";
   os << "calibration (LiDAR -> IMU):\n";
   printExtrinsic(os, "T_I_L", hc.T_I_L);
   os << "==================================================";
@@ -238,6 +247,43 @@ inline bool loadConfigFromYaml(const std::vector<std::string>& yaml_paths, Confi
   // The map frame is the parent (odometry) frame for published poses/clouds.
   hc.map_frame = yaml.get<std::string>("map", "frame", hc.map_frame);
 
+  // --- localization against a frozen map ---
+  hc.map_load_path = yaml.get<std::string>("map", "load_path", "");
+  hc.map_update = yaml.get<bool>("map", "update", true);
+  if (!hc.map_load_path.empty()) {
+    std::error_code ec;
+    if (!std::filesystem::exists(hc.map_load_path, ec)) {
+      LOG(E, "Config error: 'map.load_path' does not exist: " << hc.map_load_path);
+      return false;
+    }
+  } else if (!hc.map_update) {
+    LOG(E, "Config error: 'map.update: false' without 'map.load_path' would register every scan "
+           "against an empty map that never fills.");
+    return false;
+  }
+  // Initial T_W_I in the loaded map's frame, as [x, y, z, qx, qy, qz, qw] (TUM
+  // order). Absent = start at the origin with the gravity-aligned attitude from
+  // bias initialization, which is what replaying the mapping run itself wants.
+  const std::vector<double> init_pose = yaml.get<std::vector<double>>("map", "initial_pose", {});
+  if (!init_pose.empty()) {
+    if (init_pose.size() != 7) {
+      LOG(E, "Config error: 'map.initial_pose' must be [x, y, z, qx, qy, qz, qw], got "
+                 << init_pose.size() << " elements.");
+      return false;
+    }
+    const Quaternion q(init_pose[6], init_pose[3], init_pose[4], init_pose[5]);  // w, x, y, z
+    if (std::abs(q.norm() - 1.0) > 1e-3) {
+      LOG(E, "Config error: 'map.initial_pose' quaternion is not unit (norm " << q.norm() << ").");
+      return false;
+    }
+    hc.initial_pose = Transform(q.normalized(), V3(init_pose[0], init_pose[1], init_pose[2]));
+    hc.has_initial_pose = true;
+    if (hc.map_load_path.empty()) {
+      LOG(W, "'map.initial_pose' is set without 'map.load_path': the pose only shifts the origin "
+             "of a map built from scratch.");
+    }
+  }
+
   // --- preprocess ---
   if (!config_internal::getPositive(yaml, "preprocess", "downsample_resolution_m", 0.15,
                                     hc.preprocess.downsample_resolution)) {
@@ -272,6 +318,13 @@ inline bool loadConfigFromYaml(const std::vector<std::string>& yaml_paths, Confi
   hc.map_save_path = yaml.get<std::string>("debug", "map_save_path", "");
   hc.accumulated_map_save_path = yaml.get<std::string>("debug", "accumulated_map_save_path", "");
   hc.accumulated_map_leaf_m = yaml.get<double>("debug", "accumulated_map_leaf_m", 0.05);
+  const int map_stride = yaml.get<int>("debug", "publish_map_stride", 0);
+  if (map_stride < 0) {
+    LOG(E, "Config error: 'debug.publish_map_stride' must be >= 0 (0 = off), got " << map_stride
+                                                                                  << ".");
+    return false;
+  }
+  hc.publish_map_stride = static_cast<size_t>(map_stride);
 
   // --- dashboard (live status print) ---
   hc.print_dashboard = yaml.get<bool>("debug", "dashboard", false);

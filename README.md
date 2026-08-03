@@ -27,8 +27,23 @@ BIEVR-LIO is a robust LiDAR-Inertial Odometry framework that uses a high-resolut
 voxel-wise oriented height image map to exploit subtle geometric variations in
 challenging, information-sparse environments.
 
-### Fork changes:
-- map saving in pcd and bumpmap formats 
+### Fork changes
+
+This fork adds map persistence and a localization mode on top of upstream's
+odometry, plus the plumbing to run both on new datasets:
+
+- **Map saving** as `.pcd` (reconstructed points) and `.bumpmap` (native voxels)
+  — see [Saving a map](#saving-a-map).
+- **Map loading + frozen-map localization**: `BIEVRMap::importMap`, `map.update`
+  and a configurable start pose — see [Localizing in a saved map](#localizing-in-a-saved-map).
+  The map can also be published to RViz so a localization run is legible.
+- **A native `.bumpmap` dump format** (voxel poses, bump images, voxel index and
+  smoothed image) and Python tooling to read and diff dumps — see
+  [The `.bumpmap` format](#the-bumpmap-format).
+- **Replay controls** for `process_bag`: `max_scans`, `start_offset_s` and
+  `rate` (real-time playback) — see [Replay controls](#replay-controls).
+- **New sensor configs and runners** for GEODE and for RT-Autonomy's dual-Livox
+  mining truck — see [Fork datasets and runners](#fork-datasets-and-runners).
 
 <details>
 <summary><b>Abstract</b></summary>
@@ -203,7 +218,9 @@ BIEVR-LIO provides two entry points, available for both ROS versions:
   processes messages as they arrive. Use it with a live sensor or alongside
   `rosbag play`.
 - **`process_bag`** reads a recorded bag directly and pushes its messages through
-  the pipeline as fast as they can be processed (no real-time playback). This is the preferred choice for offline evaluation and reproducing results.
+  the pipeline as fast as they can be processed. This is the preferred choice for
+  offline evaluation and reproducing results. This fork can also throttle it to
+  real time for visualization — see [Replay controls](#replay-controls).
 
 In the commands below, replace `<sensor_config>` with one of the provided configs
 (see [Configuration](#configuration)) or your own. Add `rviz:=true` to bring up
@@ -289,6 +306,137 @@ configs to `config/sensor_configs/<your_name>.yaml` and adjust:
 
 The algorithm parameters in `params.yaml` can usually be left at their defaults.
 </details>
+
+# Map saving and localization (fork)
+
+Upstream BIEVR-LIO is pure odometry: the map lives and dies with the process.
+This fork can write that map to disk, load it back, and register against it with
+updates disabled — i.e. localize in a previously built map. All of it is driven
+from the same YAML files described above; no new command-line interface.
+
+## Saving a map
+
+Set a save path in the `debug` section (of `params.yaml`, or of the sensor config,
+which wins on a per-leaf basis):
+
+| Key | Meaning |
+|---|---|
+| `debug.map_save_path` | Writes `<path>.pcd` and `<path>.bumpmap` when the bag/stream ends. Empty = off. |
+| `debug.accumulated_map_save_path` | Writes `<path>.pcd`: the union of the raw registered scans, voxel-downsampled, with real LiDAR intensity. Much larger; independent of the bump map. |
+| `debug.accumulated_map_leaf_m` | Leaf size for that downsample (default `0.05`). `<= 0` keeps every point. |
+| `debug.trajectory_path` | TUM trajectory (`t x y z qx qy qz qw`). |
+
+`<path>.pcd` is a binary PCD reconstructed from the BIEVR map — one point per valid
+bump-image pixel, `intensity` = that pixel's accumulated weight. `<path>.bumpmap`
+is the map itself (oriented voxel poses + bump images), which is what you load
+back.
+
+## Localizing in a saved map
+
+Add a `map.load_path` and turn updates off:
+
+```yaml
+map:
+  load_path: "/path/to/mine.bumpmap"
+  update: False                 # freeze: no scan is ever integrated
+  initial_pose: [0, 0, 0, 0, 0, 0, 1]   # optional; [x, y, z, qx, qy, qz, qw]
+  publish_map_stride: 10        # see below (lives under debug:)
+```
+
+| Key | Meaning |
+|---|---|
+| `map.load_path` | Native `.bumpmap` to load at startup. Empty = build a map from scratch (upstream behaviour). |
+| `map.update` | `False` freezes the map: registration still runs, but nothing is integrated. Defaults to `True`. |
+| `map.initial_pose` | Start pose `T_W_I` **in the loaded map's frame**, TUM order (`w` last). Absent = start at the origin with the gravity-aligned attitude from bias initialization — which is what replaying the mapping run itself wants. |
+| `debug.publish_map_stride` | Publish the loaded map once on `points/map` (world frame, latched), keeping every N-th point, so RViz can show what you are localizing against. `0` = off. |
+
+Loading is strict by design — a localization run that silently fell back to
+mapping would look like a success. 
+
+Two properties worth knowing:
+
+- **Only `roll`/`pitch` of `initial_pose` are checked.** They are observable from
+  gravity, so the pipeline warns when the configured attitude disagrees with the
+  measured one by more than 5°. Yaw and position are free.
+- **A loaded map cannot correctly resume mapping.** `outer_sum_` (the second
+  moment used to re-estimate voxel normals) is not serialized, so `update: True`
+  together with `load_path` is a debugging combination, not a lifelong-mapping
+  mode.
+
+Bias initialization still assumes the platform is **stationary** at the start.
+Starting mid-run (see `start_offset_s` below) works — registration against the
+frozen map pulls the estimate in within a few seconds — but the initial biases and
+attitude will be poor if the platform is moving.
+
+## Replay controls
+
+`process_bag` gained three optional arguments, all off by default. They are available both as launch arguments and
+directly on the node:
+
+| Argument | Meaning |
+|---|---|
+| `max_scans:=N` | Stop after N point clouds. The bag is then closed and the map/trajectory saved through the normal path, so short smoke runs still exercise the export. |
+| `start_offset_s:=S` | Drop the first S seconds of the bag. With `map.initial_pose` this starts a localization run in the middle of a map. |
+| `rate:=R` | Throttle replay to R× real time (`1` = wall clock). `0` = as fast as the hardware allows. |
+
+```bash
+# watch a localization run in real time, starting 300 s into the bag
+ros2 launch bievr_lio_ros2 process_bag.launch.py \
+  sensor_config:=<sensor_config> rosbag:=/path/to/bag_dir \
+  rate:=1 start_offset_s:=300 rviz:=true rviz_config:=localization
+```
+
+`rviz_config:=localization` opens `rviz/localization.rviz` (frozen map in grey,
+the live registered scan on top, pose axes) instead of the mapping view
+`rviz/config.rviz`.
+
+## The `.bumpmap` format
+
+A binary dump of the observed voxels: a header (magic, version, voxel size, pixel
+size, voxel count) followed by one record per voxel — the two voxel poses, the
+centroid and normal, the point count, the row-major `bump_img` / `bump_weights`
+matrices, the integer `voxel_index` (the hash key) and `bump_smoothed`.
+
+Storing `bump_smoothed` rather than re-deriving it on load matters because the
+registration samples that image **exclusively**; a map loaded without it would
+register against all zeros. Storing `voxel_index` makes the hash key explicit
+instead of re-deriving it from the centroid.
+
+Python tooling in `scripts/`:
+
+| Script | Use |
+|---|---|
+| `load_bumpmap.py MAP` | Parse a dump; `load_bumpmap()` for small maps, `iter_bumpmap()` to stream large ones. |
+| `compare_bumpmap.py A B` | Order-insensitive diff, keyed on voxel index (export order is hash-map insertion order, so a re-export need not match line for line). Exit 1 on any difference. |
+| `view_map.py` | Quick visualization. |
+
+## Fork datasets and runners
+
+Additional sensor configs beyond the upstream table:
+
+| Config | Data |
+|---|---|
+| `geode` | GEODE metro-tunnel sequences, device γ (Livox Avia) |
+| `geode_alpha` | GEODE urban-tunnel sequences, device α |
+| `nora` | RT-Autonomy mining truck, dual Livox HAP merged into one cloud (both extrinsics identity, since the merged cloud and the IMU share a frame) |
+
+Two helper scripts drive whole runs, assembling a per-run config next to the
+output so what was run stays inspectable:
+
+- **`run_bievr_container.sh [sequence]`** — GEODE sequences in the
+  `bievr_lio_ros2` Docker image.
+- **`run_bievr_nora.sh [bag_dir]`** — the truck bags, **built and run natively**
+  (the Docker image builds BIEVR from a GitHub clone, so it would not contain
+  local changes). Mapping by default; `MAP_LOAD=<map.bumpmap>` switches it to
+  localization. Other knobs: `OUT_DIR`, `MAX_SCANS`, `START_OFFSET_S`,
+  `INITIAL_POSE`, `RATE`, `MAP_STRIDE`, `MAP_SAVE`, `SENSOR_CONFIG`, `IMU_TOPIC`,
+  `BUILD=0`, `RVIZ=1` (which implies `RATE=1` and, in localization mode, publishing
+  the map).
+
+```bash
+./run_bievr_nora.sh                                              # map a bag
+MAP_LOAD=<out>/map.bumpmap RVIZ=1 ./run_bievr_nora.sh            # localize, watch it
+```
 
 # Acknowledgements
 We thank the authors of [DLIO](https://github.com/vectr-ucla/direct_lidar_inertial_odometry), [Wavemap](https://github.com/ethz-asl/wavemap) and [UGPM](https://github.com/UTS-RI/ugpm) for open-sourcing their works that served as an inspiration for us.

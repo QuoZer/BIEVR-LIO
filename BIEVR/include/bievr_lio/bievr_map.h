@@ -61,6 +61,20 @@ class BIEVRMap {
   // representation. Returns the number of points written to the PCD.
   size_t exportMap(const std::string& pcd_path, const std::string& native_path) const;
 
+  // Reconstruct the map as a world-frame point cloud - the same points exportMap
+  // writes to its PCD (one per valid bump-image pixel), but in memory and keeping
+  // only every `stride`-th of them. Intended for publishing a loaded map to RViz,
+  // where the full cloud (millions of points) is more than the display needs.
+  void reconstructPoints(Pointcloud& out, size_t stride = 1) const;
+
+  // Load a native dump written by exportMap, replacing the current map contents.
+  // Returns the number of voxels loaded, 0 on failure.
+  size_t importMap(const std::string& native_path);
+
+  // Native bump-map format version: pose + bump image + weights + voxel index +
+  // smoothed image. The only version exportMap writes and importMap accepts.
+  static constexpr uint32_t kNativeFormatVersion = 2;
+
   const double& voxel_size = config_.voxel_size;
   const double& pixel_size = config_.px_size;
   const double& inv_px_size = inv_px_size_;

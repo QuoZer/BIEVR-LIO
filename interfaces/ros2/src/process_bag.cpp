@@ -4,8 +4,10 @@
 #include <tbb/global_control.h>
 #include <tbb/task_arena.h>
 
+#include <chrono>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
+#include <thread>
 #include <rclcpp/serialization.hpp>
 #include <rosbag2_cpp/reader.hpp>
 #include <sensor_msgs/msg/imu.hpp>
@@ -26,6 +28,42 @@ T deserialize(const rclcpp::SerializedMessage& serialized) {
   T msg;
   rclcpp::Serialization<T>().deserialize_message(&serialized, &msg);
   return msg;
+}
+
+// Optional "--max_scans N" flag: stop reading after N point clouds. The bag is
+// then closed and the map saved through the normal path, so a short smoke run
+// still exercises the trajectory/map export. 0 (default) = read the whole bag.
+size_t parseMaxScans(int argc, char** argv) {
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string(argv[i]) == "--max_scans") {
+      return static_cast<size_t>(std::stoull(argv[i + 1]));
+    }
+  }
+  return 0;
+}
+
+// Optional "--start_offset_s S": drop every message in the first S seconds of
+// the bag. Combined with map.initial_pose this starts a localization run in the
+// middle of a frozen map. 
+double parseStartOffset(int argc, char** argv) {
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string(argv[i]) == "--start_offset_s") {
+      return std::stod(argv[i + 1]);
+    }
+  }
+  return 0.0;
+}
+
+// Optional "--rate R": throttle replay to R times real time (1.0 = wall clock),
+// which is what makes an RViz session watchable. 0 (default) = as fast as the
+// hardware allows, the right setting for batch runs.
+double parseRate(int argc, char** argv) {
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (std::string(argv[i]) == "--rate") {
+      return std::stod(argv[i + 1]);
+    }
+  }
+  return 0.0;
 }
 }  // namespace
 
@@ -64,11 +102,48 @@ int main(int argc, char** argv) {
   const std::string& pc_topic = config.topic_config.pointcloud_topic;
   const std::string& imu_topic = config.topic_config.imu_topic;
 
+  const size_t max_scans = parseMaxScans(argc, argv);
+  size_t n_scans = 0;
+  LOG(I, max_scans > 0, "Stopping after " << max_scans << " point clouds (--max_scans).");
+
+  const double start_offset_s = parseStartOffset(argc, argv);
+  int64_t t_first_ns = -1;
+  LOG(I, start_offset_s > 0.0,
+      "Skipping the first " << start_offset_s << " s of the bag (--start_offset_s).");
+
+  const double rate = parseRate(argc, argv);
+  int64_t t_replay_start_ns = -1;
+  std::chrono::steady_clock::time_point wall_start;
+  LOG(I, rate > 0.0, "Replaying at " << rate << "x real time (--rate).");
+
   while (rclcpp::ok() && reader.has_next()) {
     auto bag_msg = reader.read_next();
     const std::string& topic = bag_msg->topic_name;
     if (topic != pc_topic && topic != imu_topic) {
       continue;
+    }
+
+    if (start_offset_s > 0.0) {
+      if (t_first_ns < 0) t_first_ns = bag_msg->recv_timestamp;
+      if (bag_msg->recv_timestamp - t_first_ns < static_cast<int64_t>(start_offset_s * 1e9)) {
+        continue;
+      }
+    }
+
+    // Pace the replay against the wall clock. The reference is taken from the
+    // first message actually processed, so this composes with --start_offset_s
+    // (no catching up for the skipped part) and a run that falls behind stays
+    // behind rather than sprinting to catch up.
+    if (rate > 0.0) {
+      if (t_replay_start_ns < 0) {
+        t_replay_start_ns = bag_msg->recv_timestamp;
+        wall_start = std::chrono::steady_clock::now();
+      }
+      const auto bag_elapsed =
+          std::chrono::nanoseconds(bag_msg->recv_timestamp - t_replay_start_ns);
+      const auto target = wall_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                           bag_elapsed / rate);
+      std::this_thread::sleep_until(target);
     }
 
     rclcpp::SerializedMessage serialized(*bag_msg->serialized_data);
@@ -79,6 +154,7 @@ int main(int argc, char** argv) {
       bievr::StampedIntensityPointcloud pointcloud;
       bievr::msgToPointcloud(msg, pointcloud);
       synchronizer->addPointcloud(pointcloud);
+      ++n_scans;
     }
 #ifdef BIEVR_WITH_LIVOX
     else if (type == "livox_ros_driver2/msg/CustomMsg") {
@@ -86,6 +162,7 @@ int main(int argc, char** argv) {
       bievr::StampedIntensityPointcloud pointcloud;
       bievr::msgToPointcloud(msg, pointcloud);
       synchronizer->addPointcloud(pointcloud);
+      ++n_scans;
     }
 #endif
     else if (type == "sensor_msgs/msg/Imu") {
@@ -93,6 +170,11 @@ int main(int argc, char** argv) {
       bievr::ImuMeasurement imu;
       bievr::msgToImuMeasurement(msg, imu);
       synchronizer->addImu(imu);
+    }
+
+    if (max_scans > 0 && n_scans >= max_scans) {
+      LOG(I, "Reached --max_scans (" << max_scans << "), stopping bag replay.");
+      break;
     }
   }
 

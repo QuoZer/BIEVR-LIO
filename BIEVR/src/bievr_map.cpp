@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <utility>
 #include <vector>
@@ -483,7 +484,7 @@ size_t BIEVRMap::exportMap(const std::string& pcd_path, const std::string& nativ
     }
     const char magic[8] = {'B', 'I', 'E', 'V', 'R', 'M', 'P', '\0'};
     native.write(magic, sizeof(magic));
-    const uint32_t version = 1;
+    const uint32_t version = kNativeFormatVersion;
     native.write(reinterpret_cast<const char*>(&version), sizeof(version));
     const double voxel_size = config_.voxel_size;
     const double px_size = config_.px_size;
@@ -537,12 +538,209 @@ size_t BIEVRMap::exportMap(const std::string& pcd_path, const std::string& nativ
                    static_cast<std::streamsize>(row_major_img.size() * sizeof(float)));
       native.write(reinterpret_cast<const char*>(row_major_weights.data()),
                    static_cast<std::streamsize>(row_major_weights.size() * sizeof(float)));
+
+      // --- Voxel index + smoothed image. ---
+      // The index makes the hash key explicit instead of re-deriving it from the
+      // centroid on load, and the smoothed image is what the registration
+      // actually samples, so writing it keeps import lossless.
+      const Eigen::Vector3i idx = getVoxelIdx(centroid);
+      const int32_t idx_arr[3] = {idx.x(), idx.y(), idx.z()};
+      native.write(reinterpret_cast<const char*>(idx_arr), sizeof(idx_arr));
+
+      std::vector<float> row_major_smoothed(static_cast<size_t>(rows) * cols);
+      for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+          row_major_smoothed[static_cast<size_t>(i) * cols + j] = voxel.bump_smoothed_(i, j);
+        }
+      }
+      native.write(reinterpret_cast<const char*>(row_major_smoothed.data()),
+                   static_cast<std::streamsize>(row_major_smoothed.size() * sizeof(float)));
     }
   }
 
   LOG(I, "exportMap: wrote " << n_voxels << " voxels / " << n_points << " points -> " << pcd_path
                              << " (+ " << native_path << ")");
   return n_points;
+}
+
+void BIEVRMap::reconstructPoints(Pointcloud& out, size_t stride) const {
+  if (stride == 0) stride = 1;
+  // Same reconstruction as exportMap's PCD pass (kept separate so that one can
+  // keep streaming straight to disk instead of buffering the whole cloud).
+  size_t n_valid = 0;
+  for (const auto& kv : map_) {
+    const Voxel& voxel = kv.second.voxel;
+    if (!voxel.observed_ || voxel.bump_weights_.size() == 0) continue;
+    for (int i = 0; i < voxel.bump_weights_.rows(); ++i) {
+      for (int j = 0; j < voxel.bump_weights_.cols(); ++j) {
+        if (voxel.bump_weights_(i, j) > 0) n_valid++;
+      }
+    }
+  }
+
+  out.clear();
+  out.resize((n_valid + stride - 1) / stride);
+  size_t seen = 0;
+  size_t written = 0;
+  for (const auto& kv : map_) {
+    const Voxel& voxel = kv.second.voxel;
+    if (!voxel.observed_ || voxel.bump_weights_.size() == 0) continue;
+    const Transform T_W_C = voxel.T_C_W_.inverse();
+    for (int i = 0; i < voxel.bump_img_.rows(); ++i) {
+      for (int j = 0; j < voxel.bump_img_.cols(); ++j) {
+        if (voxel.bump_weights_(i, j) <= 0) continue;
+        if (seen++ % stride != 0) continue;
+        if (written >= out.size()) break;
+        const Point p_C(j * config_.px_size, i * config_.px_size, voxel.bump_img_(i, j));
+        out[written++] = T_W_C * p_C;
+      }
+    }
+  }
+  out.resize(written);
+}
+
+size_t BIEVRMap::importMap(const std::string& native_path) {
+  std::ifstream native(native_path, std::ios::binary);
+  if (!native.is_open()) {
+    LOG(E, "importMap: could not open '" << native_path << "'.");
+    return 0;
+  }
+
+  char magic[8] = {0};
+  native.read(magic, sizeof(magic));
+  const char expected[8] = {'B', 'I', 'E', 'V', 'R', 'M', 'P', '\0'};
+  if (!native || std::memcmp(magic, expected, sizeof(magic)) != 0) {
+    LOG(E, "importMap: '" << native_path << "' is not a BIEVR bump map.");
+    return 0;
+  }
+
+  uint32_t version = 0;
+  double file_voxel_size = 0.0;
+  double file_px_size = 0.0;
+  uint64_t n_voxels = 0;
+  native.read(reinterpret_cast<char*>(&version), sizeof(version));
+  native.read(reinterpret_cast<char*>(&file_voxel_size), sizeof(file_voxel_size));
+  native.read(reinterpret_cast<char*>(&file_px_size), sizeof(file_px_size));
+  native.read(reinterpret_cast<char*>(&n_voxels), sizeof(n_voxels));
+  if (!native) {
+    LOG(E, "importMap: truncated header in '" << native_path << "'.");
+    return 0;
+  }
+  if (version != kNativeFormatVersion) {
+    LOG(E, "importMap: unsupported format version " << version << " (this build reads and writes v"
+                                                    << kNativeFormatVersion << " only).");
+    return 0;
+  }
+
+  // A config that disagrees with the file would silently mis-address
+  // and mis-scale the whole map. Refuse rather than reinterpret.
+  constexpr double kSizeTol = 1e-9;
+  if (std::abs(file_voxel_size - config_.voxel_size) > kSizeTol ||
+      std::abs(file_px_size - config_.px_size) > kSizeTol) {
+    LOG(E, "importMap: map geometry (voxel "
+               << file_voxel_size << " m, pixel " << file_px_size << " m) does not match the config ("
+               << config_.voxel_size << " m / " << config_.px_size << " m).");
+    return 0;
+  }
+
+  map_.clear();
+  voxels_cache_.clear();
+
+  size_t n_loaded = 0;
+  size_t n_duplicate = 0;
+  for (uint64_t v = 0; v < n_voxels; ++v) {
+    double T_C_W[12];
+    double T_O_W[12];
+    double centroid_arr[3];
+    double normal_arr[3];
+    uint64_t num_points = 0;
+    int32_t rows = 0;
+    int32_t cols = 0;
+    native.read(reinterpret_cast<char*>(T_C_W), sizeof(T_C_W));
+    native.read(reinterpret_cast<char*>(T_O_W), sizeof(T_O_W));
+    native.read(reinterpret_cast<char*>(centroid_arr), sizeof(centroid_arr));
+    native.read(reinterpret_cast<char*>(normal_arr), sizeof(normal_arr));  // = T_O_W row 2
+    native.read(reinterpret_cast<char*>(&num_points), sizeof(num_points));
+    native.read(reinterpret_cast<char*>(&rows), sizeof(rows));
+    native.read(reinterpret_cast<char*>(&cols), sizeof(cols));
+    if (!native || rows <= 0 || cols <= 0 || num_points == 0) {
+      LOG(E, "importMap: corrupt voxel record " << v << " in '" << native_path << "'.");
+      return 0;
+    }
+
+    const size_t n_px = static_cast<size_t>(rows) * static_cast<size_t>(cols);
+    std::vector<float> img(n_px);
+    std::vector<float> weights(n_px);
+    native.read(reinterpret_cast<char*>(img.data()),
+                static_cast<std::streamsize>(n_px * sizeof(float)));
+    native.read(reinterpret_cast<char*>(weights.data()),
+                static_cast<std::streamsize>(n_px * sizeof(float)));
+
+    int32_t idx_arr[3];
+    native.read(reinterpret_cast<char*>(idx_arr), sizeof(idx_arr));
+    const Eigen::Vector3i voxel_idx(idx_arr[0], idx_arr[1], idx_arr[2]);
+    std::vector<float> smoothed(n_px);
+    native.read(reinterpret_cast<char*>(smoothed.data()),
+                static_cast<std::streamsize>(n_px * sizeof(float)));
+    if (!native) {
+      LOG(E, "importMap: truncated voxel record " << v << " in '" << native_path << "'.");
+      return 0;
+    }
+
+    const V3 centroid(centroid_arr[0], centroid_arr[1], centroid_arr[2]);
+
+    Voxel voxel;
+    voxel.observed_ = true;
+    Eigen::Matrix4d T_C_W_mat = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d T_O_W_mat = Eigen::Matrix4d::Identity();
+    for (int r = 0; r < 3; ++r) {
+      for (int c = 0; c < 4; ++c) {
+        T_C_W_mat(r, c) = T_C_W[r * 4 + c];
+        T_O_W_mat(r, c) = T_O_W[r * 4 + c];
+      }
+    }
+    voxel.T_C_W_.matrix() = T_C_W_mat;
+    voxel.T_O_W_.matrix() = T_O_W_mat;
+    voxel.num_points_ = static_cast<size_t>(num_points);
+    voxel.sum_ = centroid * static_cast<double>(num_points);
+    // outer_sum_ is not serialized (updateNormal is the only consumer); left at
+    // zero, which is why an imported map must not be used for mapping.
+    voxel.bump_img_.resize(rows, cols);
+    voxel.bump_weights_.resize(rows, cols);
+    voxel.bump_smoothed_.resize(rows, cols);
+    for (int i = 0; i < rows; ++i) {
+      for (int j = 0; j < cols; ++j) {
+        const size_t k = static_cast<size_t>(i) * cols + j;
+        voxel.bump_img_(i, j) = img[k];
+        voxel.bump_weights_(i, j) = weights[k];
+        voxel.bump_smoothed_(i, j) = smoothed[k];
+      }
+    }
+
+    computeScore(voxel);  // mean_img_dist_, used by informed sampling
+
+    const size_t hash = hashIndexVoxel(voxel_idx);
+    if (map_.find(hash) != map_.end()) {
+      n_duplicate++;
+      continue;
+    }
+    voxels_cache_.push_front(hash);
+    map_.emplace(hash, VoxelEntry{std::move(voxel), voxels_cache_.begin()});
+    n_loaded++;
+  }
+
+  if (n_duplicate > 0) {
+    LOG(W, "importMap: skipped " << n_duplicate << " voxels with duplicate hash keys.");
+  }
+  LOG(I, "importMap: loaded " << n_loaded << " voxels (format v" << version << ", voxel "
+                              << file_voxel_size << " m, pixel " << file_px_size << " m) from "
+                              << native_path);
+  // Eviction only ever runs inside integratePoints, so an over-sized map is kept
+  // whole while frozen; it would start shedding voxels the moment mapping resumed.
+  LOG(W, n_loaded > config_.max_size,
+      "importMap: loaded " << n_loaded << " voxels, more than map.max_size (" << config_.max_size
+                           << "). Raise max_size before mapping into this map.");
+  return n_loaded;
 }
 
 bool BIEVRMap::nearestVoxel(const Eigen::Vector3d& point, size_t& result) const {

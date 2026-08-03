@@ -40,6 +40,21 @@ class Pipeline {
     // every point (no downsample).
     double accumulated_map_leaf_m = 0.05;
 
+    // --- Localization against a frozen map ---------------------------------
+    // When non-empty, the map is loaded from this native ".bumpmap" at startup
+    // (BIEVRMap::importMap) instead of being built from scratch.
+    std::string map_load_path = "";
+    // When false, no scan is ever integrated into the map: the map stays exactly
+    // as loaded and the pipeline only localizes against it.
+    bool map_update = true;
+    // Initial T_W_I in the loaded map's frame. Without it the pipeline starts at
+    // the origin with a gravity-aligned attitude
+    bool has_initial_pose = false;
+    Transform initial_pose = Transform::Identity();
+    // When > 0, publish the map once (on the first processed frame) as a
+    // world-frame cloud on "points/map", keeping every N-th point. 0 = never publish.
+    size_t publish_map_stride = 0;
+
     size_t min_points_for_map_init = 100;
     size_t map_size_running_threshold = 5;
     size_t informed_sample_count = 300;
@@ -131,6 +146,9 @@ class Pipeline {
   V3 acc_bias_ = V3::Zero();
   V3 gyro_bias_ = V3::Zero();
   V3 gravity_dir_ = V3(0, 0, 1);
+  // The map cloud is published once, on the first frame (the publisher does not
+  // exist yet while the Pipeline is being constructed).
+  bool map_cloud_published_ = false;
   // Latest gyro reading, used to report the angular velocity in the odometry twist.
   V3 latest_gyro_ = V3::Zero();
   // Accelerometer scale resolved during bias estimation (1 if raw, g if the IMU

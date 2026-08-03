@@ -27,7 +27,16 @@ def launch_setup(context, *args, **kwargs):
     rosbag = LaunchConfiguration('rosbag').perform(context)
 
     rviz_config = os.path.join(
-        get_package_share_directory('bievr_lio_ros2'), 'rviz', 'config.rviz')
+        get_package_share_directory('bievr_lio_ros2'), 'rviz',
+        LaunchConfiguration('rviz_config').perform(context) + '.rviz')
+
+    # Replay controls. All three are off at 0, which is the batch default; they
+    # are only appended when set, so the node's own defaults stay authoritative.
+    replay_args = []
+    for flag in ('max_scans', 'start_offset_s', 'rate'):
+        value = LaunchConfiguration(flag).perform(context)
+        if float(value) != 0:
+            replay_args += ['--' + flag, value]
 
     return [
         Node(
@@ -42,7 +51,7 @@ def launch_setup(context, *args, **kwargs):
                 '--sensor_config_file', resolve_config(sensor_config, 'sensor_configs'),
                 '--params_file', resolve_config(params, ''),
                 '--bag', rosbag,
-            ],
+            ] + replay_args,
         ),
         Node(
             package='rviz2',
@@ -69,5 +78,19 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rviz', default_value='false',
             description='Launch RViz2 with the bievr_lio visualization config.'),
+        DeclareLaunchArgument(
+            'rviz_config', default_value='config',
+            description="Which rviz config in the package's rviz/ dir to open: "
+                        "'config' (mapping) or 'localization' (frozen map + live scan)."),
+        DeclareLaunchArgument(
+            'max_scans', default_value='0',
+            description='Stop after N point clouds; 0 = process the whole bag.'),
+        DeclareLaunchArgument(
+            'start_offset_s', default_value='0',
+            description='Skip the first N seconds of the bag; 0 = start at the beginning.'),
+        DeclareLaunchArgument(
+            'rate', default_value='0',
+            description='Replay speed as a multiple of real time (1 = wall clock); '
+                        '0 = as fast as the hardware allows.'),
         OpaqueFunction(function=launch_setup),
     ])

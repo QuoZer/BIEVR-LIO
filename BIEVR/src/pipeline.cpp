@@ -1,9 +1,11 @@
 #include "bievr_lio/pipeline.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 
 #include "bievr_lio/inertial_factor.h"
 #include "bievr_lio/prior_factor.h"
@@ -15,6 +17,17 @@ namespace bievr {
 
 Pipeline::Pipeline(const Config& config) : config_(config) {
   map_ = std::make_shared<BIEVRMap>(config_.map);
+
+  if (!config_.map_load_path.empty()) {
+    if (map_->importMap(config_.map_load_path) == 0) {
+      LOG(E, "Failed to load map from '" << config_.map_load_path
+                                         << "'. Refusing to run: a localization run that silently "
+                                            "fell back to mapping would look like a success.");
+      throw std::runtime_error("BIEVR: could not load map '" + config_.map_load_path + "'");
+    }
+    LOG(I, "Localizing against a map of " << map_->size() << " voxels; map updates are "
+                                          << (config_.map_update ? "ENABLED" : "disabled") << ".");
+  }
 
   if (!config_.log_path.empty()) {
     LOG(I, "Logging to " << config_.log_path);
@@ -96,6 +109,15 @@ void Pipeline::processFrame(const std::vector<ImuMeasurement>& imu_data,
   const Header header{points_filtered_L.end_stamp, static_cast<uint32_t>(x_i.id + 1),
                       config_.map_frame};
 
+  if (!map_cloud_published_ && config_.publish_map_stride > 0 && map_->size() > 0) {
+    Pointcloud map_cloud;
+    map_->reconstructPoints(map_cloud, config_.publish_map_stride);
+    publish(map_cloud, header, "points/map");
+    map_cloud_published_ = true;
+    LOG(I, "Published the map as " << map_cloud.size() << " points on points/map (every "
+                                   << config_.publish_map_stride << " th).");
+  }
+
   // Propagate state based on IMU data
   timing::Timer preint_timer("02_preint");
   ImuIntegratorPtr imu_integrator =
@@ -145,7 +167,9 @@ void Pipeline::processFrame(const std::vector<ImuMeasurement>& imu_data,
   // Transform the full cloud using the estimated pose and add it to the map
   timing::Timer map_timer("06_map");
   const Pointcloud points_registered = T_W_I * points_undistorted_I;
-  map_->integratePoints(points_registered, &ranges);
+  if (config_.map_update) {
+    map_->integratePoints(points_registered, &ranges);
+  }
   map_timer.Stop();
 
   // Bookkeeping and optimization of the intertial part of the state
@@ -208,9 +232,33 @@ bool Pipeline::initializeBias(const std::vector<ImuMeasurement>& imu_data,
   x_init.p = V3::Zero();
   x_init.v = V3::Zero();
 
+  if (config_.has_initial_pose) {
+    // Start where the configured pose says, in the loaded map's frame. 
+    // Only the pose is taken from config; biases, gravity direction and the accelerometer
+    // scale still come from the measurements above.
+    const Quaternion q_cfg = config_.initial_pose.quaternion();
+    // Roll/pitch are observable from gravity, so a configured attitude that
+    // disagrees with the measured one either has the wrong tilt or the map frame
+    // is not gravity-aligned. Yaw and position are free.
+    const V3 g_body_measured = R_est.transpose() * V3(0, 0, 1);
+    const V3 g_body_config = q_cfg.conjugate() * V3(0, 0, 1);
+    const double tilt_deg =
+        (180. / M_PI) * std::acos(std::clamp(g_body_measured.dot(g_body_config), -1.0, 1.0));
+    LOG(W, tilt_deg > 5.0,
+        "Configured initial attitude disagrees with the gravity-derived one by "
+            << tilt_deg << " deg. Check map.initial_pose (roll/pitch are observable).");
+    x_init.quat = q_cfg;
+    x_init.p = config_.initial_pose.translation();
+    LOG(I, "Starting from configured initial pose t = [" << x_init.p.transpose() << "].");
+  }
+
   addState(imu_data.back().stamp, x_init.quat, x_init.p, x_init.v);
 
-  if (pointcloud.empty()) {
+  if (map_->size() > 0) {
+    // A map was imported: there is nothing to bootstrap, so register against it
+    // from the very first frame
+    phase_ = Phase::Running;
+  } else if (pointcloud.empty()) {
     phase_ = Phase::NeedMap;
   } else {
     const Transform T_W_I_init(x_init.quat, x_init.p);
@@ -218,7 +266,9 @@ bool Pipeline::initializeBias(const std::vector<ImuMeasurement>& imu_data,
     for (size_t i = 0; i < pointcloud.size(); ++i) {
       ranges[i] = pointcloud[i].head<3>().norm();
     }
-    map_->integratePoints(T_W_I_init * pointcloud, &ranges);
+    if (config_.map_update) {
+      map_->integratePoints(T_W_I_init * pointcloud, &ranges);
+    }
     phase_ = Phase::Running;
   }
   return true;
@@ -229,7 +279,9 @@ void Pipeline::tryInitMap(uint64_t stamp, const State& x_j_pred, const Transform
                           std::vector<double>& ranges, const Header& header) {
   if (undistorted.size() < config_.min_points_for_map_init) return;
   const Pointcloud registered = T_W_I_init * undistorted;
-  map_->integratePoints(registered, &ranges);
+  if (config_.map_update) {
+    map_->integratePoints(registered, &ranges);
+  }
   addState(stamp, x_j_pred.quat, x_j_pred.p, x_j_pred.v);
   publishLatestState(header);
   publish(IntensityPointcloud(registered, intensities), header, "points/registered");
