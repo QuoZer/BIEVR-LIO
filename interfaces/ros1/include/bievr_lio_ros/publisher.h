@@ -1,6 +1,7 @@
 #ifndef LIO_ROS_PUBLISHER_H_
 #define LIO_ROS_PUBLISHER_H_
 
+#include <diagnostic_msgs/DiagnosticArray.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <geometry_msgs/Vector3Stamped.h>
 #include <nav_msgs/Odometry.h>
@@ -55,6 +56,7 @@ struct RosBackend {
   using Odometry = nav_msgs::Odometry;
   using Vector3Stamped = geometry_msgs::Vector3Stamped;
   using TransformStamped = geometry_msgs::TransformStamped;
+  using DiagnosticArray = diagnostic_msgs::DiagnosticArray;
 
   explicit RosBackend(Handle nh) : nh_(nh) {}
 

@@ -38,7 +38,7 @@ class PublisherBase {
   // "/bievr_lio/odometry"). Absolute topics (leading '/') are left untouched.
   PublisherBase(Handle handle, std::shared_ptr<Pipeline> pipeline, const std::string& ns = "")
       : backend_(std::move(handle)), ns_(ns) {
-    registerTypes<Pointcloud, IntensityPointcloud, Odometry, V3>(pipeline);
+    registerTypes<Pointcloud, IntensityPointcloud, Odometry, V3, DiagnosticsReport>(pipeline);
   }
   virtual ~PublisherBase() = default;
 
@@ -97,6 +97,61 @@ class PublisherBase {
     if (!getOrAdvertise<typename Backend::Vector3Stamped>(topic)) return false;
     headerToMsg(header, msg.header);
     vecToMsg(vec, msg.vector);
+    publishers_[topic].publish(msg);
+    return true;
+  }
+
+  bool publishImpl(const DiagnosticsReport& report, const Header& header,
+                   const std::string& topic, const std::string& /*child_frame*/) {
+    typename Backend::DiagnosticArray msg;
+    if (!getOrAdvertise<typename Backend::DiagnosticArray>(topic)) return false;
+    headerToMsg(header, msg.header);
+
+    typename Backend::DiagnosticArray::_status_type::value_type status;
+    status.name = "bievr_lio";
+    status.hardware_id = "bievr";
+    const auto& reg = report.registration;
+    // OK/WARN rather than a free-text convention, so a consumer can gate on the
+    // level alone. No effective points means the scan constrained nothing.
+    const bool tracking = reg.effective_points > 0;
+    status.level = tracking ? 0 : 1;  // DiagnosticStatus::OK / ::WARN
+    status.message = tracking ? "tracking" : "no effective points";
+
+    auto add = [&status](const std::string& key, double value) {
+      typename decltype(status.values)::value_type kv;
+      kv.key = key;
+      kv.value = std::to_string(value);
+      status.values.push_back(kv);
+    };
+
+    // Key names match the colleague's /fastlio_diagnostics where the quantity is
+    // the same, so one parser reads both tools.
+    add("effective_points", reg.effective_points);
+    add("downsampled_points", reg.source_points);
+    add("ratio", reg.source_points > 0
+                     ? static_cast<double>(reg.effective_points) / reg.source_points
+                     : 0.0);
+    add("residual", reg.mean_abs_residual);
+    add("speed", report.speed);
+    add("pos_x", report.position.x());
+    add("pos_y", report.position.y());
+    add("pos_z", report.position.z());
+    add("roll", report.rpy.x());
+    add("pitch", report.rpy.y());
+    add("yaw", report.rpy.z());
+    // BIEVR-specific: no FAST-LIO equivalent.
+    add("inlier_points", reg.inlier_points);
+    add("no_correspondence", reg.no_correspondence);
+    add("huber_cost", reg.huber_cost);
+    add("iterations", reg.iterations);
+    add("converged", reg.converged ? 1.0 : 0.0);
+    add("lm_lambda", reg.lm_lambda);
+    add("lambda_min_6", reg.lambda_min_6);
+    add("kappa_6", reg.cond_6);
+    add("lambda_min_3", reg.lambda_min_3);
+    add("kappa_3", reg.cond_3);
+
+    msg.status.push_back(status);
     publishers_[topic].publish(msg);
     return true;
   }

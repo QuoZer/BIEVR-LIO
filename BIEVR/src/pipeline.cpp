@@ -37,6 +37,19 @@ Pipeline::Pipeline(const Config& config) : config_(config) {
     }
   }
 
+  if (!config_.diagnostics_path.empty()) {
+    LOG(I, "Writing per-scan diagnostics to " << config_.diagnostics_path);
+    diagnostics_log_ = std::make_shared<std::ofstream>(config_.diagnostics_path, std::ios::trunc);
+    if (!diagnostics_log_->is_open()) {
+      LOG(E, "Error opening diagnostics file.");
+    } else {
+      (*diagnostics_log_) << "t,effective_points,downsampled_points,ratio,residual,speed,"
+                             "pos_x,pos_y,pos_z,roll,pitch,yaw,inlier_points,no_correspondence,"
+                             "huber_cost,iterations,converged,lm_lambda,lambda_min_6,kappa_6,"
+                             "lambda_min_3,kappa_3\n";
+    }
+  }
+
   if (config_.print_dashboard && !config_.dashboard_ascii_path.empty()) {
     std::ifstream ascii_file(config_.dashboard_ascii_path);
     if (ascii_file.is_open()) {
@@ -193,6 +206,8 @@ void Pipeline::processFrame(const std::vector<ImuMeasurement>& imu_data,
   if (!config_.log_path.empty()) {
     logTUM(nsToS(points_L.end_stamp), T_W_I);
   }
+
+  reportDiagnostics(nsToS(points_L.end_stamp), T_W_I, x_j_pred.v, optimizer.diagnostics(), header);
 
   if (config_.print_timing) {
     LOG(I, "Timings:\n" << timing::Timing::Print());
@@ -519,6 +534,39 @@ void Pipeline::logTUM(double timestamp, const Transform& pose) {
   (*tum_log_) << std::fixed;
   (*tum_log_) << timestamp << " " << t.x() << " " << t.y() << " " << t.z() << " " << q.x() << " "
               << q.y() << " " << q.z() << " " << q.w() << "\n";
+}
+
+void Pipeline::reportDiagnostics(double timestamp, const Transform& T_W_I, const V3& velocity,
+                                 const RegistrationDiagnostics& diag, const Header& header) {
+  DiagnosticsReport report;
+  report.registration = diag;
+  report.position = T_W_I.translation();
+  // Not Eigen's eulerAngles(0,1,2): that returns a branch with the first angle
+  // in [0, pi], so level driving reports roll ~= 180 deg. This is the usual
+  // ZYX (yaw-pitch-roll) decomposition, matching tf2's getRPY and scipy's
+  // as_euler("xyz") - which is what the offline metrics compare against.
+  const M3& R = T_W_I.linear();
+  report.rpy = V3(std::atan2(R(2, 1), R(2, 2)),
+                  std::atan2(-R(2, 0), std::hypot(R(2, 1), R(2, 2))),
+                  std::atan2(R(1, 0), R(0, 0)));
+  report.speed = velocity.norm();
+
+  publish(report, header, "diagnostics");
+
+  if (!diagnostics_log_ || !diagnostics_log_->is_open()) return;
+
+  const double ratio = diag.source_points > 0
+                           ? static_cast<double>(diag.effective_points) / diag.source_points
+                           : 0.0;
+  (*diagnostics_log_) << std::fixed << timestamp << "," << diag.effective_points << ","
+                      << diag.source_points << "," << ratio << "," << diag.mean_abs_residual << ","
+                      << report.speed << "," << report.position.x() << "," << report.position.y()
+                      << "," << report.position.z() << "," << report.rpy.x() << ","
+                      << report.rpy.y() << "," << report.rpy.z() << "," << diag.inlier_points << ","
+                      << diag.no_correspondence << "," << diag.huber_cost << "," << diag.iterations
+                      << "," << (diag.converged ? 1 : 0) << "," << diag.lm_lambda << ","
+                      << diag.lambda_min_6 << "," << diag.cond_6 << "," << diag.lambda_min_3 << ","
+                      << diag.cond_3 << "\n";
 }
 
 }  // namespace bievr

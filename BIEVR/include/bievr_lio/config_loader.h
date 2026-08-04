@@ -184,6 +184,8 @@ inline void printConfigOverview(const Config& config) {
        << (hc.dashboard_ascii_path.empty() ? "<none>" : hc.dashboard_ascii_path) << "\n";
   }
   os << "  log_path:             " << (hc.log_path.empty() ? "<none>" : hc.log_path) << "\n";
+  os << "  diagnostics_path:     "
+     << (hc.diagnostics_path.empty() ? "<none>" : hc.diagnostics_path) << "\n";
   os << "  map_save_path:        " << (hc.map_save_path.empty() ? "<none>" : hc.map_save_path)
      << "\n";
   os << "  accumulated_map_save_path: "
@@ -315,6 +317,7 @@ inline bool loadConfigFromYaml(const std::vector<std::string>& yaml_paths, Confi
   hc.print_timing = yaml.get<bool>("debug", "timing", false);
   hc.print_debug = yaml.get<bool>("debug", "log", false);
   hc.log_path = yaml.get<std::string>("debug", "trajectory_path", "");
+  hc.diagnostics_path = yaml.get<std::string>("debug", "diagnostics_path", "");
   hc.map_save_path = yaml.get<std::string>("debug", "map_save_path", "");
   hc.accumulated_map_save_path = yaml.get<std::string>("debug", "accumulated_map_save_path", "");
   hc.accumulated_map_leaf_m = yaml.get<double>("debug", "accumulated_map_leaf_m", 0.05);

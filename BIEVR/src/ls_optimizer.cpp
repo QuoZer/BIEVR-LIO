@@ -6,6 +6,9 @@
 #include <tbb/enumerable_thread_specific.h>
 #include <tbb/parallel_reduce.h>
 
+#include <Eigen/Eigenvalues>
+#include <limits>
+
 #include "bievr_lio/log++.h"
 #include "bievr_lio/utils.h"
 
@@ -30,8 +33,10 @@ Transform LsqRegistration::computeTransformation(const Transform& T_W_L_init) {
     LOG(I, "***************** optimize *****************");
   }
 
+  int iterations = 0;
   for (int i = 0; i < config_.max_iterations && !converged_; i++) {
     Transform delta;
+    ++iterations;
     if (!stepLm(x0, delta)) {
       LOG(W, "lm not converged!!");
       break;
@@ -39,7 +44,38 @@ Transform LsqRegistration::computeTransformation(const Transform& T_W_L_init) {
     converged_ = isConverged(delta);
   }
 
+  diagnostics_.source_points = static_cast<int>(points_j_.size());
+  diagnostics_.iterations = iterations;
+  diagnostics_.converged = converged_;
+  diagnostics_.lm_lambda = lm_lambda_;
+  finalizeDiagnostics();
+
   return x0;
+}
+
+void LsqRegistration::finalizeDiagnostics() {
+  diagnostics_.no_correspondence =
+      diagnostics_.source_points - diagnostics_.effective_points;
+
+  Eigen::SelfAdjointEigenSolver<Matrix66> es6(last_H_, Eigen::EigenvaluesOnly);
+  const auto& ev6 = es6.eigenvalues();
+  diagnostics_.lambda_min_6 = ev6.minCoeff();
+  diagnostics_.lambda_max_6 = ev6.maxCoeff();
+  diagnostics_.cond_6 = diagnostics_.lambda_min_6 > 0.0
+                            ? diagnostics_.lambda_max_6 / diagnostics_.lambda_min_6
+                            : std::numeric_limits<double>::infinity();
+
+  // Columns 3..5 of the Jacobian are the translation part (see linearize:
+  // SE3_Jac.block<3,3>(0,3) = d p_o / d t), so the translation-only
+  // information is the bottom-right 3x3 block.
+  Eigen::SelfAdjointEigenSolver<M3> es3(last_H_.bottomRightCorner<3, 3>(),
+                                        Eigen::EigenvaluesOnly);
+  const auto& ev3 = es3.eigenvalues();
+  diagnostics_.lambda_min_3 = ev3.minCoeff();
+  diagnostics_.lambda_max_3 = ev3.maxCoeff();
+  diagnostics_.cond_3 = diagnostics_.lambda_min_3 > 0.0
+                            ? diagnostics_.lambda_max_3 / diagnostics_.lambda_min_3
+                            : std::numeric_limits<double>::infinity();
 }
 
 bool LsqRegistration::isConverged(const Transform& delta) const {
@@ -129,6 +165,13 @@ double LsqRegistration::linearize(const Transform& T_W_L, Matrix66* H, Vector6* 
     // Remember how many points contributed correspondences in this (Jacobian)
     // linearization so the pipeline can report the effective point count.
     num_effective_points_ = total.count;
+
+    last_H_ = total.H;
+    diagnostics_.effective_points = total.count;
+    diagnostics_.inlier_points = total.inlier_count;
+    diagnostics_.huber_cost = total.error_sum;
+    diagnostics_.mean_abs_residual =
+        total.count > 0 ? total.abs_residual_sum / total.count : -1.0;
   }
 
   return total.error_sum;

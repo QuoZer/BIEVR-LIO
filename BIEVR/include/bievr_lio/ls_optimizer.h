@@ -154,7 +154,9 @@ inline bool sampleValueAndGradient(const Voxel* voxel, const double x, const dou
 
 struct Accumulator {
   int count = 0;
+  int inlier_count = 0;
   double error_sum = 0.0;
+  double abs_residual_sum = 0.0;
   Matrix66 H = Matrix66::Zero();
   Vector6 b = Vector6::Zero();
   double huber_delta = 0.2;  // default delta
@@ -166,6 +168,11 @@ struct Accumulator {
     double w = inlier ? 1.0 : huber_delta / abs_r;
 
     error_sum += inlier ? 0.5 * r * r : huber_delta * (abs_r - 0.5 * huber_delta);
+    // Kept separately from error_sum because the Huber cost is not a distance:
+    // it is quadratic below the delta and linear above it, so its mean is not
+    // comparable with any other method's point-to-surface residual.
+    abs_residual_sum += abs_r;
+    inlier_count += inlier ? 1 : 0;
 
     if (J) {
       const Vector6 wJ = w * J->transpose();
@@ -176,10 +183,43 @@ struct Accumulator {
 
   inline void merge(const Accumulator& other) {
     count += other.count;
+    inlier_count += other.inlier_count;
     error_sum += other.error_sum;
+    abs_residual_sum += other.abs_residual_sum;
     H += other.H;
     b += other.b;
   }
+};
+
+// Per-scan registration quality, all of it already computed by the solve and
+// previously discarded. Observation only: nothing here feeds back into the
+// estimate.
+struct RegistrationDiagnostics {
+  int source_points = 0;      // points handed to the optimizer
+  int effective_points = 0;   // of those, the ones that found a map correspondence
+  int inlier_points = 0;      // of those, the ones inside the Huber delta
+  // Points with no map correspondence at all. The "am I still inside the map?"
+  // signal: it climbs long before the pose does.
+  int no_correspondence = 0;
+  // Mean |point-to-bump-surface distance| [m] over the effective points, or -1
+  // when there were none. The -1 matters: averaging a stale value across a scan
+  // that found nothing would make a lost lock look like a good fit.
+  double mean_abs_residual = -1.0;
+  double huber_cost = 0.0;    // the quantity the LM actually minimizes
+  int iterations = 0;         // outer LM iterations actually run
+  bool converged = false;
+  double lm_lambda = -1.0;    // final damping; rises when the problem conditions badly
+
+  // Eigenvalues of the final information matrix H = J^T W J. The 6x6 spans
+  // (rotation, translation); the 3x3 block is translation only, which is the
+  // same quantity and the same block convention as analysis/degeneracy.py, so
+  // the two are directly comparable.
+  double lambda_min_6 = 0.0;
+  double lambda_max_6 = 0.0;
+  double cond_6 = 0.0;
+  double lambda_min_3 = 0.0;
+  double lambda_max_3 = 0.0;
+  double cond_3 = 0.0;
 };
 
 class LsqRegistration {
@@ -197,12 +237,18 @@ class LsqRegistration {
   // pose). Reported on the dashboard as "Effective Points".
   int numEffectivePoints() const { return num_effective_points_; }
 
+  // Valid after computeTransformation().
+  const RegistrationDiagnostics& diagnostics() const { return diagnostics_; }
+
  private:
   bool isConverged(const Transform& delta) const;
 
   double linearize(const Transform& T_W_L, Matrix66* H = nullptr, Vector6* b = nullptr);
 
   bool stepLm(Transform& x0, Transform& delta);
+
+  // Eigendecomposition of the last H, once per scan rather than per iteration.
+  void finalizeDiagnostics();
 
   RegistrationConfig config_;
   double lm_lambda_ = -1.0;
@@ -211,6 +257,8 @@ class LsqRegistration {
   std::vector<M3> skew_points_j_;
   bool converged_ = false;
   int num_effective_points_ = 0;
+  RegistrationDiagnostics diagnostics_;
+  Matrix66 last_H_ = Matrix66::Zero();
 };
 
 }  // namespace bievr

@@ -3,6 +3,7 @@
 
 #include <tf2_ros/transform_broadcaster.h>
 
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3_stamped.hpp>
 #include <memory>
@@ -57,6 +58,7 @@ struct Ros2Backend {
   using Odometry = nav_msgs::msg::Odometry;
   using Vector3Stamped = geometry_msgs::msg::Vector3Stamped;
   using TransformStamped = geometry_msgs::msg::TransformStamped;
+  using DiagnosticArray = diagnostic_msgs::msg::DiagnosticArray;
 
   explicit Ros2Backend(Handle node)
       : node_(node), tf_(std::make_shared<tf2_ros::TransformBroadcaster>(node)) {}

@@ -12,6 +12,16 @@
 
 namespace bievr {
 
+// One scan's worth of observable state: where the pipeline thinks it is, and
+// how well the registration that put it there actually fitted. Published as a
+// diagnostic_msgs/DiagnosticArray and mirrored to a CSV.
+struct DiagnosticsReport {
+  RegistrationDiagnostics registration;
+  V3 position = V3::Zero();
+  V3 rpy = V3::Zero();  // roll, pitch, yaw [rad], intrinsic XYZ
+  double speed = 0.0;   // [m/s]
+};
+
 class Pipeline {
  public:
   struct Config {
@@ -30,6 +40,10 @@ class Pipeline {
     std::string map_frame = "map";
     std::string body_frame = "body";
     std::string log_path = "";
+    // When non-empty, one CSV row of per-scan registration diagnostics is
+    // written here. A CSV rather than only the ROS topic because offline runs
+    // replay as fast as the hardware allows, where a subscriber drops rows.
+    std::string diagnostics_path = "";
     // When non-empty, saveMap() writes the accumulated map here: "<path>.pcd" (binary
     // point cloud) and "<path>.bumpmap" (native voxel dump). See BIEVRMap::exportMap.
     std::string map_save_path = "";
@@ -131,6 +145,11 @@ class Pipeline {
   // Logging
   void logTUM(double timestamp, const Transform& pose);
 
+  // Writes one diagnostics row (CSV) and publishes the same values as a
+  // DiagnosticArray. Observation only.
+  void reportDiagnostics(double timestamp, const Transform& T_W_I, const V3& velocity,
+                         const RegistrationDiagnostics& diag, const Header& header);
+
   // Packs three signed voxel indices (21 bits each) into one int64 key for
   // accum_map_.
   static int64_t accumKey(int ix, int iy, int iz);
@@ -159,6 +178,7 @@ class Pipeline {
       std::function<void(const void*, const Header&, const std::string&, const std::string&)>;
   std::unordered_map<std::type_index, PublishFunction> publishers_;
   std::shared_ptr<std::ofstream> tum_log_;
+  std::shared_ptr<std::ofstream> diagnostics_log_;
 
   struct AccumCell {
     double sx = 0, sy = 0, sz = 0, si = 0;
