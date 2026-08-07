@@ -138,7 +138,8 @@ overrides = {
         "publish_map_stride": int("$MAP_STRIDE"),
     },
 }
-if "$MAP_LOAD" or "$MAP_SAVE" == "1":
+
+if "$MAP_SAVE" == "1":
     overrides["debug"]["map_save_path"] = "$OUT_DIR/map"
     overrides["debug"]["accumulated_map_save_path"] = "$OUT_DIR/raw_map"
 if "$MAP_LOAD":

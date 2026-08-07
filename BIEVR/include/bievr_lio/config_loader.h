@@ -165,6 +165,7 @@ inline void printConfigOverview(const Config& config) {
   os << "preprocess:\n";
   os << "  downsample_res_m:     " << hc.preprocess.downsample_resolution << "\n";
   os << "  informed_sampling:    " << yn(hc.preprocess.informed_sampling) << "\n";
+  os << "  informed_samples:     " << hc.informed_sample_count << "\n";
   os << "optimization:\n";
   os << "  huber_delta:          " << hc.registration.huber_delta << "\n";
   os << "  img_residual:         " << yn(hc.registration.img_residual) << "\n";
@@ -292,6 +293,12 @@ inline bool loadConfigFromYaml(const std::vector<std::string>& yaml_paths, Confi
     return false;
   }
   hc.preprocess.informed_sampling = yaml.get<bool>("preprocess", "informed_sampling", false);
+  int informed_sample_count = 0;
+  if (!config_internal::getPositive(yaml, "preprocess", "informed_sample_count", 300,
+                                    informed_sample_count)) {
+    return false;
+  }
+  hc.informed_sample_count = static_cast<size_t>(informed_sample_count);
 
   // --- optimization ---
   if (!config_internal::getPositive(yaml, "optimization", "huber_delta", 100.,

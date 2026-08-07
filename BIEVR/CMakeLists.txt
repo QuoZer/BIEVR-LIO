@@ -95,6 +95,54 @@ install(EXPORT ${PROJECT_NAME}Targets
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
 )
 
+# ---------------------------------------------------------------------------
+# Standalone tools
+#
+# bumpmap_from_pcd builds a .bumpmap directly from an accumulated point cloud
+# (see tools/bumpmap_from_pcd.cpp / docs/plans/SPEC-bumpmap-from-pcd.md). It
+# needs PCL's readers for PCD/PLY input, which the core library otherwise has
+# no use for, so PCL and yaml-cpp (config_loader.h) are found and linked only
+# for this executable -- the bievr_lio library keeps its current dependency
+# set (Eigen / Ceres / TBB / glog).
+# ---------------------------------------------------------------------------
+option(BIEVR_BUILD_TOOLS "Build standalone conversion tools (needs PCL)" ON)
+if(BIEVR_BUILD_TOOLS)
+  # Ubuntu's vtk9 package (pulled in transitively by PCL's io component) refers
+  # to an MPI::MPI_C imported target in its own exported VTK-targets.cmake, but
+  # only defines it if MPI was already found first -- otherwise CMake errors
+  # out inside VTK's config file before PCL's own (optional) VTK handling ever
+  # runs. Finding MPI up front sidesteps that packaging quirk.
+  # find_package(MPI ... COMPONENTS C) needs the C language enabled in this
+  # CMake project, which `project(... LANGUAGES CXX)` above does not do.
+  enable_language(C)
+  find_package(MPI COMPONENTS C QUIET)
+  find_package(PCL REQUIRED COMPONENTS common io)
+  find_package(yaml-cpp REQUIRED)
+
+  add_executable(bumpmap_from_pcd tools/bumpmap_from_pcd.cpp)
+  set_target_properties(bumpmap_from_pcd PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+  )
+  target_compile_options(bumpmap_from_pcd PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:-fconcepts>
+    $<$<CONFIG:Release>:-O3>
+    ${PCL_DEFINITIONS}
+  )
+  target_include_directories(bumpmap_from_pcd PRIVATE ${PCL_INCLUDE_DIRS})
+  target_link_directories(bumpmap_from_pcd PRIVATE ${PCL_LIBRARY_DIRS})
+  target_link_libraries(bumpmap_from_pcd PRIVATE
+    ${PROJECT_NAME}
+    ${PCL_LIBRARIES}
+    yaml-cpp::yaml-cpp
+  )
+
+  install(TARGETS bumpmap_from_pcd
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+endif()
+
 set(BIEVR_LIO_HAS_GLOG ${glog_FOUND})
 configure_package_config_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/${PROJECT_NAME}Config.cmake.in

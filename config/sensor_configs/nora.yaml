@@ -1,0 +1,30 @@
+# RT-Autonomy underground mining truck ("nora"), dual Livox HAP, pre-merged bag.
+#
+# The merger (glim/merge_clouds.py) transforms both HAP clouds into
+# livox_hap_left_frame and republishes them as /merged_scan; the IMU stream is
+# the left HAP's own IMU (or /merged_imu on the pre-merged full bag), which sits
+# in that same frame. Cloud and IMU therefore share a frame and BOTH extrinsics
+# are identity (see slam_rnd/CLAUDE.md, nora_merged_full_offline_mcap.md).
+#
+# The IMU topic differs per bag (/merged_imu on the full pre-merged bag,
+# /livox/imu_10_0_0_50 on the 150-750 slice); run_bievr_nora.sh detects it from
+# the bag metadata and overrides this value in the per-run config copy.
+#
+# Accelerometer units: the raw HAP topics report g, not m/s^2 (finding 4).
+# imu.normalized is left at -1 (autodetect) in params.yaml, which resolves this
+# per run - check "Bias initialized" / the acc scale in the log on a new bag.
+
+topics:
+  pointcloud: "/merged_scan"
+  imu: "/merged_imu"
+
+calibration: # T_IMU_LIDAR (LiDAR -> IMU); one merged frame => identity
+  translation: [0.0, 0.0, 0.0]
+  rotation: [1, 0, 0,
+             0, 1, 0,
+             0, 0, 1]
+
+lidar:
+  min_range_m: 1.2 # 0-10 % of merged points sit at exactly range 0; nothing real
+                   # is returned below 1 m, so this drops exactly the invalids.
+  max_range_m: 80 # matches nora_lio/nora_cli_config.yaml

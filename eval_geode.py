@@ -255,9 +255,10 @@ def fix_ownership(path: Path) -> None:
 
 
 def evaluate_sequence(seq: str, dataset_root: Path, T_ext: np.ndarray,
-                      T_imu_lidar: np.ndarray, fix_owner: bool, args) -> dict:
+                      T_imu_lidar: np.ndarray, fix_owner: bool, args,
+                      run_dir: Path | None = None) -> dict:
     seq_dir = dataset_root / seq
-    bievr_out = seq_dir / "bievr_out"
+    bievr_out = run_dir if run_dir is not None else seq_dir / "bievr_out"
     src_traj = bievr_out / "traj_lidar.txt"
     gt_file = dataset_root / GT_FILES[seq]
 
@@ -331,6 +332,11 @@ def main():
                              "so both give the same number.")
     parser.add_argument("--fix-ownership", action="store_true",
                         help="sudo chown bievr_out dirs back to current user (usually unneeded).")
+    parser.add_argument("--run-dir", type=Path, default=None,
+                        help="Override the default <seq>/bievr_out directory: read "
+                             "traj_lidar.txt from here and write the *_in_gt_frame.txt "
+                             "files here too. Only makes sense with a single sequence "
+                             "argument.")
     # GEODE's Leica GT is not tightly time-synced to the sensor clock; the offset
     # is constant per sequence but differs between sequences. Following GEODE's
     # rmse.py, we sweep t_offset and report the minimum APE. Pass --t-offset to
@@ -347,6 +353,11 @@ def main():
                              "residual offset is ~0.7 m of spurious APE.")
     args = parser.parse_args()
 
+    if args.run_dir is not None and len(args.sequences) > 1:
+        print("error: --run-dir only makes sense with a single sequence argument",
+              file=sys.stderr)
+        sys.exit(1)
+
     results = {}
     for seq in args.sequences:
         print(f"\n── {seq} ──────────────────────────────")
@@ -356,7 +367,7 @@ def main():
         T_ext = build_extrinsic(seq)
         T_imu_lidar = load_T_imu_lidar(sensor_config)
         results[seq] = evaluate_sequence(seq, dataset_root, T_ext, T_imu_lidar,
-                                         args.fix_ownership, args)
+                                         args.fix_ownership, args, run_dir=args.run_dir)
 
     print("\n── Summary ──────────────────────────────")
     for seq, per_frame in results.items():

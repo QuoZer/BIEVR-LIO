@@ -110,6 +110,66 @@ what `nora_loc/sweep_bievr_loc.sh` uses.
   ⚠️ The `speed` column is `x_j_pred.v`, the IMU **prediction** before the
   inertial window is optimized; `analysis/loc_metrics.py` differentiates the
   trajectory instead, and that is what the reports use.
+- **`bumpmap_from_pcd` builds a `.bumpmap` from any world-frame cloud**
+  (2026-08-04) — `BIEVR/tools/`, built under `option(BIEVR_BUILD_TOOLS ON)`; PCL
+  and yaml-cpp link to that executable only. Takes PCD/PLY, the same
+  `params.yaml`+sensor config the pipeline uses (`importMap` refuses a geometry
+  mismatch to 1e-9, so it must), `--override`, `--chunk-size` (default 2 M) and
+  `--stride`. Writes `map.bumpmap` + `map.pcd` into a directory laid out like a
+  mapping run's, so every existing consumer works on it unmodified.
+  ⚠️ `install/setup.bash` mis-resolves under zsh here — run with
+  `LD_LIBRARY_PATH="$PWD/install/bievr_lio/lib:/opt/ros/jazzy/lib:$LD_LIBRARY_PATH"`.
+  A converted map localizes the full nora bag at **6.8 mm mean**, but a
+  round-trip's per-voxel normals agree only moderately (Jaccard 0.98, median
+  2.5°, **p99 47°**) — fine at this density, don't assume it for a sparse cloud.
+  Weights are uniform (no sensor origin in an accumulated cloud ⇒
+  `ranges=nullptr`), so `bump_weights_`/PCD `intensity` is not on an online map's
+  scale. See `docs/experiments/2026-08-04-bumpmap-from-pcd.md`. This makes
+  `voxel_size_m`/`pixel_size_m` sweepable for the first time — swept 2026-08-05,
+  see **F08** below.
+- ⚠️ **`map.pixel_size_m` has two regimes, set by the source cloud — see F08.**
+  Measure points per occupied voxel first (`nora_loc/bumpmap_fill.py`).
+  **Sparse (≲25 pts/voxel, e.g. a converted GLIM map):** `0.1` beats the shipped
+  `0.05` on accuracy, disk, RAM *and* speed at once (0.014 88 vs 0.015 32 m RMSE,
+  111 vs 297 MiB, 273 vs 459 MB RSS), and `0.025` is a cliff — it diverges at
+  `voxel_size_m` 0.25 *and* 2.0 as fill collapses to 1.7–3.1 %.
+  **Dense (≳70, which is what a BIEVR mapping run produces):** the ordering
+  **reverses** — `0.025` is the best cell and holds lock everywhere, `0.1` is
+  22 % worse, and the cliff moves to `0.0125`. Pair a fine pixel with a finer
+  `preprocess.downsample_resolution_m`: at px 0.025 that is worth −29 %, at
+  px 0.1 it is +45 % *worse*. Fill does not predict which cells tip over in
+  either regime. **`voxel_size_m: 0.5` needs no change**, best at every pixel
+  size (tested against density only at 0.5). Map size is set by pixel size alone
+  (total pixels ≈ surface / pixel²), so `pixel_size_m` is the memory knob — the
+  ladder spans 27 MiB to 6.7 GiB on it. Not applied to `config/params.yaml`: it
+  is baked into every existing `.bumpmap` and `importMap` would reject them all.
+  `docs/experiments/2026-08-05-map-source-density.md`.
+  ⚠️ **A rebuilt map is not bit-reproducible** — two builds of identical geometry
+  from identical input agree to ~1.5e-7 per voxel, worth mean 0.53 mm of
+  trajectory (9 µm of RMSE). A run against a *fixed* map is still deterministic.
+- ⚠️ **`preprocess.informed_sampling: true` is a bad default — see F07.** It keeps
+  every point in the top `informed_sample_count` voxels by bump roughness and one
+  point per remaining *map* voxel (0.5 m, 5× the downsample grid), so the shipped
+  count of 300 throws away most of the cloud. Uniform downsampling beats it on
+  accuracy *and* wall time at matched budget, and at count 3000 the two become
+  identical — the prioritization contributes nothing measurable. Use
+  `informed_sampling: false` + `optimization.huber_delta: 0.05`: 16 % lower RMSE
+  at 9.0× real time. `informed_sample_count` became a config key on 2026-08-04
+  (it was hardcoded in `pipeline.h`); the default path is unchanged, checked
+  bit-identical.
+  ⚠️ **That is a nora-localization setting — do not carry it to GEODE.** Swept
+  there the same day: shield5 −66 %, but **shield1 +12 %**, and both tunnels are
+  inert to 1.5 mm. `informed_sample_count: 100` **loses lock on both shields**
+  (89 % / 88 % through, `kappa_6` → ∞) while uniform at a *smaller* budget
+  survives. The knob that generalizes is `huber_delta: 0.05` alone.
+  On nora it *is* robust to `voxel_size_m`: uniform wins at all four sizes
+  tested, and informed **degenerates into uniform as voxels grow** — at 2.0 m it
+  retains 99.5 % of the uniform budget and the two agree to 0.06 mm, which is
+  F07's `informed_sample_count: 3000` result reached from the other direction.
+  What matters is the fraction of observed voxels kept at full resolution.
+- ⚠️ **A geometry-mismatched map aborts via uncaught `std::runtime_error`
+  (exit 134)** rather than exiting cleanly. The log names the cause first.
+  `pipeline.cpp` throws, `process_bag.cpp`'s `main()` does not catch. Known, unfixed.
 - **Bumpmap format v2 is the only format** (2026-08-03): pose + bump image +
   weights + `int32 voxel_index[3]` + `float32 bump_smoothed[rows*cols]`.
   `exportMap` writes it, `importMap` accepts *only* it — v1 support (index
@@ -118,6 +178,20 @@ what `nora_loc/sweep_bievr_loc.sh` uses.
   which existed solely to validate that recompute. The stale v1 dump
   `~/Documents/nora_merged_150_750_bievr_out/map_v1.bumpmap` is now unreadable
   by both the C++ and the Python side; re-export from the bag if it's ever needed.
+  ⚠️ **So are all four GEODE maps** — `<seq>/bievr_out/map.bumpmap` for tunnel1,
+  tunnel2, shield1 and shield5 are v1 and raise *"Unsupported format version 1"*
+  (found 2026-08-06). Every nora map on the drive is v2. Re-run the sequence to
+  get a readable GEODE bumpmap.
+- **Ground surfaces and roughness come out of the map with no C++ change** —
+  `analysis/terrain.py` (`roughness`, `ground`) streams the v2 file through
+  `scripts/load_bumpmap.py`. Roughness is `std(bump_img)` per voxel, the one
+  bump statistic invariant to both the arbitrary normal sign and the arbitrary
+  plane offset, so none of the `view_map.py` normalization is needed. **Read F10
+  before quoting a number**: the ranking is stable across an 8× density change
+  (Spearman +0.73) but the millimetre value is not, and it must always carry the
+  pixel size it was measured at. `ground` must be given the trajectory *from the
+  same run as the map* — a foreign trajectory seeds 85 of 8145 poses (F05).
+  `docs/experiments/2026-08-06-ground-roughness.md`.
 - `scripts/load_bumpmap.py` has a streaming `iter_bumpmap()` (the full loader
   needs ~1 GB on a 517 MB map). `scripts/compare_bumpmap.py A B` diffs two dumps
   **order-insensitively** (keyed on the voxel index; export order is insertion
@@ -144,6 +218,13 @@ what `nora_loc/sweep_bievr_loc.sh` uses.
   stride from a sampled fill-fraction estimate (nora ⇒ stride 6, 1.9 M squares,
   3.9 s, 1.0 GB). `--mode points` is the old sampled cloud, `--mode patches` the
   2-D montage, `--save out.ply` writes the mesh instead of opening a window.
+
+### S4 resource profile — full body bag (2026-08-04, `bench/runs/body_v2_fixed/`)
+
+**43.9 cpu-ms/scan, 757 MB peak and flat, 11.2× real time on 4.9 cores**, over
+3 reps at ≤0.3 % contention. `mem_at_10pct` equals the peak: a frozen map does
+not grow, which is the point of measuring it.
+
 
 ### Measured numbers (600 s / 1236.5 m slice)
 
