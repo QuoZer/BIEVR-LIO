@@ -53,9 +53,12 @@ done
 
 if [ "$BUILD" = true ]; then
     echo "Building docker: $DOCKERFILE as $DOCKER"
+    # Build context is the repo root (one level up from this script), so the
+    # image is always built from the local working copy, not from GitHub.
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     docker build --no-cache --ssh default --network=host --progress=plain \
         --build-arg USER_ID=$(id -u) --build-arg GROUP_ID=$(id -g) \
-        -f $DOCKERFILE -t $DOCKER .
+        -f "$SCRIPT_DIR/$DOCKERFILE" -t $DOCKER "$SCRIPT_DIR/.."
 fi
 
 XAUTH=/tmp/.docker.xauth
