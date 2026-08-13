@@ -2,454 +2,345 @@
   <img width=400 src="doc/bievr_final.svg">
 </p>
 
+# BIEVR-SLAM
 
-# BIEVR-LIO: Robust LiDAR-Inertial Odometry through Bump-Image-Enhanced Voxel Maps
+LiDAR-инерциальная одометрия, локализация по заранее построенной карте и конвертация
+готовых облаков точек в формат этой карты. В основе представление карты, в котором
+каждый воксель хранит ориентированное изображение высот (bump image): регистрация скана идёт напрямую по этим изображениям, поэтому слабые вариации геометрии в туннелях и других
+малоинформативных сценах остаются заметными.
 
-<p align="center">
-<a href="https://patripfr.github.io/bievr-lio/"><img src="https://shieldcn.dev/badge/Project-Page-gray?size=xs" alt="Project Page" /></a>
-<a href="https://arxiv.org/abs/2604.14421"><img src="https://shieldcn.dev/badge/arXiv-2604.14421-b31b1b?logo=arxiv&size=xs" alt="arXiv" /></a>
-<a href="https://arxiv.org/pdf/2604.14421"><img src="https://shieldcn.dev/badge/Paper-PDF-black?size=xs" alt="Paper PDF" /></a>
-<a href="LICENSE"><img src="https://shieldcn.dev/badge/License-BSD--3--Clause-green?size=xs" alt="License: BSD-3-Clause" /></a>
-<a href="https://youtu.be/TsDJOdthhNk"><img src="https://shieldcn.dev/badge/YouTube-red?logo=youtube&size=xs" alt="YouTube" /></a>
-</p>
+Ядро (`bievr_lio`) не зависит от ROS. Поверх него собирается ROS 2 интерфейс
+(`bievr_lio_ros2`) и отдельная утилита конвертации карт. Проверено на Jazzy и Humble.
 
-<p align="center">
-<a href="https://github.com/ethz-asl/BIEVR-LIO/actions/workflows/build_20_04.yaml"><img src="https://shieldcn.dev/github/ethz-asl/BIEVR-LIO/ci.svg?workflow=build_20_04.yaml&label=ROS1%20Noetic&size=xs&variant=outline&mode=light" alt="Ubuntu 20.04 + ROS Noetic Build" /></a>
-<a href="https://github.com/ethz-asl/BIEVR-LIO/actions/workflows/build_22_04.yaml"><img src="https://shieldcn.dev/github/ethz-asl/BIEVR-LIO/ci.svg?workflow=build_22_04.yaml&label=ROS2%20Humble&size=xs&variant=outline&mode=light" alt="Ubuntu 22.04 + ROS Humble Build" /></a>
-<a href="https://github.com/ethz-asl/BIEVR-LIO/actions/workflows/build_24_04.yaml"><img src="https://shieldcn.dev/github/ethz-asl/BIEVR-LIO/ci.svg?workflow=build_24_04.yaml&label=ROS2%20Jazzy&size=xs&variant=outline&mode=light" alt="Ubuntu 24.04 + ROS Jazzy Build" /></a>
-</p>
+Алгоритм и исходная реализация: **BIEVR-LIO**, ETH Zurich ASL —
+[статья (arXiv:2604.14421)](https://arxiv.org/abs/2604.14421),
+[страница проекта](https://patripfr.github.io/bievr-lio/),
+[видео](https://youtu.be/TsDJOdthhNk),
+[исходный репозиторий](https://github.com/ethz-asl/BIEVR-LIO).
 
 <p align="center">
   <img width='100%' src="doc/tunnel_detail.png">
 </p>
 
-BIEVR-LIO is a robust LiDAR-Inertial Odometry framework that uses a high-resolution,
-voxel-wise oriented height image map to exploit subtle geometric variations in
-challenging, information-sparse environments.
+## Что входит в репозиторий
 
-### Fork changes
+| Сценарий | Исполняемый файл | Результат |
+| --- | --- | --- |
+| **Маппинг** | `process_bag`, `process_topics` (пакет `bievr_lio_ros2`) | траектория в формате TUM, `map.bumpmap`, `map.pcd`, при необходимости - накопленное облако сырых сканов |
+| **Локализация** | те же две ноды, режим переключается конфигом (`map.load_path` + `map.update: false`) | траектория в системе координат загруженной карты |
+| **Конвертация карты** | `bumpmap_from_pcd` (пакет `bievr_lio`) | `map.bumpmap` + `map.pcd` из произвольного накопленного облака (PCD/PLY) |
 
-This fork adds map persistence and a localization mode on top of upstream's
-odometry, plus the plumbing to run both on new datasets:
-
-- **Map saving** as `.pcd` (reconstructed points) and `.bumpmap` (native voxels)
-  — see [Saving a map](#saving-a-map).
-- **Map loading + frozen-map localization**: `BIEVRMap::importMap`, `map.update`
-  and a configurable start pose — see [Localizing in a saved map](#localizing-in-a-saved-map).
-  The map can also be published to RViz so a localization run is legible.
-- **A native `.bumpmap` dump format** (voxel poses, bump images, voxel index and
-  smoothed image) and Python tooling to read and diff dumps — see
-  [The `.bumpmap` format](#the-bumpmap-format).
-- **Replay controls** for `process_bag`: `max_scans`, `start_offset_s` and
-  `rate` (real-time playback) — see [Replay controls](#replay-controls).
-- **New sensor configs and runners** for GEODE and for RT-Autonomy's dual-Livox
-  mining truck — see [Fork datasets and runners](#fork-datasets-and-runners).
-
-<details>
-<summary><b>Abstract</b></summary>
-<br>
-Reliable odometry is essential for mobile robots as they increasingly enter more challenging environments, which often contain little information to constrain point cloud registration, resulting in degraded LiDAR–Inertial Odometry (LIO) accuracy or even divergence. To address this, we present BIEVR-LIO, a novel approach designed specifically to exploit subtle variations in the available geometry for improved robustness. We propose a high-resolution map representation that stores surfaces as voxel-wise oriented height images. This representation can directly be used for registration without the calculation of intermediate geometric primitives while still supporting efficient updates. Since informative geometry is often sparsely distributed in the environment, we further propose a map-informed point sampling strategy to focus registration on geometrically informative regions, improving robustness in uninformative environments while reducing computational cost compared to global high-resolution sampling. Experiments across multiple sensors, platforms, and environments demonstrate state-of-the-art performance in well-constrained scenes and substantial improvements in challenging scenarios where baseline methods diverge. Additionally, we demonstrate that the fine-grained geometry captured by BIEVR-LIO can be used for downstream tasks such as elevation mapping for robot locomotion.
-</details>
-
-# Setup
-
-The core estimator (`bievr_lio`) is a self-contained, ROS-independent library. On
-top of it we provide both a **ROS1** interface (`bievr_lio_ros`) and a **ROS2**
-interface (`bievr_lio_ros2`), which live side by side under `interfaces/`.
-
-## Installation
-
-### Dependencies
-
-BIEVR-LIO is intentionally light on dependencies: the core estimator only needs
-**[Eigen](https://eigen.tuxfamily.org)** and **[Ceres](http://ceres-solver.org)**.
+Маппинг и локализация работают по одной логике в рамках одной ноды и отличаются только правилами работы с картой. 
 
 
-Build instructions for both ROS versions are below. Each also offers an optional
-Docker image for quickly trying out the system without setting up dependencies.
+## Установка
 
-<details>
-<summary><b>ROS1</b></summary>
-<br>
+### Docker
 
-### For quick testing: Docker
-
-If you just want to try the system out without setting up dependencies, build the
-image and drop into a shell inside it:
-
-```bash
-cd docker/
-./run_docker_ros1.sh -b
-```
-
-The `-b` flag builds the image. On subsequent runs you can
-omit it to reuse the existing image. Your `~/data` folder is mounted to
-`/home/bievr/data` inside the container so you can keep datasets outside the
-image.
-
-To open another terminal inside the running container (e.g. to launch a node
-and play a bag):
-
-```bash
-docker exec -it BIEVR-LIO-ROS1 /bin/bash
-```
-
-### Build
-
-Requires [ROS Noetic](https://wiki.ros.org/noetic/Installation/Ubuntu) and
-`python3-catkin-tools` (`sudo apt install python3-catkin-tools`).
-
-Create a catkin workspace and clone BIEVR-LIO into it:
-
-```bash
-mkdir -p ~/catkin_ws/src
-cd ~/catkin_ws
-catkin init
-catkin config --extend /opt/ros/noetic
-catkin config --cmake-args -DCMAKE_BUILD_TYPE=Release
-catkin config --merge-devel
-
-cd ~/catkin_ws/src
-git clone git@github.com:ethz-asl/BIEVR-LIO.git BIEVR-LIO
-```
-
-Install the Ceres version used by BIEVR-LIO with the provided script (builds
-Ceres 2.2.0 from source):
-
-```bash
-./BIEVR-LIO/docker/scripts/install_ceres.sh
-```
-
-(Optional) **Livox support.** The Livox `CustomMsg` branches are only compiled if
-the corresponding driver is found in the workspace at build time. Otherwise
-BIEVR-LIO builds fine without them. If you need to process Livox data, clone and
-build the matching driver into `~/catkin_ws/src` *before* building BIEVR-LIO
-(each driver also needs its Livox-SDK installed system-wide):
-
-- Livox gen1 (`livox_ros_driver`, enables `BIEVR_WITH_LIVOX`):
-  [livox_ros_driver](https://github.com/Livox-SDK/livox_ros_driver) +
-  [Livox-SDK](https://github.com/Livox-SDK/Livox-SDK)
-- Livox gen2 (`livox_ros_driver2`, enables `BIEVR_WITH_LIVOX2`):
-  [livox_ros_driver2](https://github.com/Livox-SDK/livox_ros_driver2) +
-  [Livox-SDK2](https://github.com/Livox-SDK/Livox-SDK2)
-
-Build and source it:
-
-```bash
-cd ~/catkin_ws
-catkin build bievr_lio_ros
-source devel/setup.bash
-```
-</details>
-
-<details>
-<summary><b>ROS2</b></summary>
-<br>
-
-### For quick testing: Docker
-
-If you just want to try the system out without setting up dependencies, build the
-image and drop into a shell inside it:
+Быстрый вариант, если не нужно собирать зависимости на хосте:
 
 ```bash
 cd docker/
 ./run_docker_ros2.sh -b
 ```
 
-The `-b` flag builds the image. On subsequent runs you can
-omit it to reuse the existing image. Your `~/data` folder is mounted to
-`/home/bievr/data` inside the container.
-
-To open another terminal inside the running container (e.g. to launch a node
-and play a bag):
+Флаг `-b` собирает образ, при последующих запусках его можно опустить. Каталог `~/data`
+хоста монтируется в `/home/bievr/data` внутри контейнера, поэтому данные не попадают в
+образ. Второй терминал в уже запущенном контейнере:
 
 ```bash
 docker exec -it BIEVR-LIO-ROS2 /bin/bash
 ```
 
-### Build
+Обратите внимание: `docker/scripts/build_ros2.sh` собирает BIEVR из клона репозитория,
+а не из рабочей копии. Локальные правки исходников в образ не попадут — для разработки
+используйте сборку на хосте.
 
-Requires [ROS2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html) and
-`python3-colcon-common-extensions`
-(`sudo apt install python3-colcon-common-extensions`). The system was tested on
-Jazzy, but other ROS2 distributions might also work.
+### Сборка на хосте
 
-Create a colcon workspace and clone BIEVR-LIO into it:
+Требуется [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html) и
+`python3-colcon-common-extensions`.
+
+Зависимости: [Eigen](https://eigen.tuxfamily.org),
+[Ceres](http://ceres-solver.org) 2.2.0, TBB, glog. Утилите `bumpmap_from_pcd`
+дополнительно нужны PCL (`common`, `io`) и yaml-cpp; если PCL в системе нет, сборку
+утилиты можно отключить: `--cmake-args -DBIEVR_BUILD_TOOLS=OFF`.
 
 ```bash
 mkdir -p ~/colcon_ws/src
 cd ~/colcon_ws/src
-git clone git@github.com:ethz-asl/BIEVR-LIO.git BIEVR-LIO
+git clone <URL этого репозитория> BIEVR-SLAM
 ```
 
-Install the Ceres version used by BIEVR-LIO with the provided script (builds
-Ceres 2.2.0 from source):
+Ceres ставится скриптом (собирает 2.2.0 из исходников):
 
 ```bash
-./BIEVR-LIO/docker/scripts/install_ceres.sh
+./BIEVR-SLAM/docker/scripts/install_ceres.sh
 ```
 
-(Optional) **Livox support.** The Livox `CustomMsg` branch is only compiled if
-`livox_ros_driver2` is found in the workspace at build time. Otherwise BIEVR-LIO
-builds fine without it. If you need to process Livox data, clone and build the
-driver into `~/colcon_ws/src` *before* building BIEVR-LIO (it also needs its
-Livox-SDK2 installed system-wide). Only gen2 exists for ROS2 (enables
-`BIEVR_WITH_LIVOX`):
-
-- [livox_ros_driver2](https://github.com/Livox-SDK/livox_ros_driver2) +
-  [Livox-SDK2](https://github.com/Livox-SDK/Livox-SDK2)
-
-Build and source it (from the workspace root, so colcon picks up both `BIEVR/`,
-the core, and `interfaces/ros2`):
+Поддержка Livox `CustomMsg` компилируется только если `livox_ros_driver2` найден в
+workspace на момент сборки; без него всё собирается и работает с обычным
+`sensor_msgs/msg/PointCloud2`. Если Livox нужен, клонируйте и соберите
+[livox_ros_driver2](https://github.com/Livox-SDK/livox_ros_driver2) вместе с
+[Livox-SDK2](https://github.com/Livox-SDK/Livox-SDK2) **до** сборки BIEVR.
 
 ```bash
 cd ~/colcon_ws
 source /opt/ros/jazzy/setup.bash
-colcon build --packages-up-to bievr_lio_ros2
+colcon build --packages-up-to bievr_lio_ros2 --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
 ```
-</details>
 
-## Run data
+Собираются три пакета: `bievr_lio` (ядро + `bumpmap_from_pcd`), `bievr_ros_common`
+(header-only конвертации и публикация) и `bievr_lio_ros2` (ноды и launch-файлы).
 
-BIEVR-LIO provides two entry points, available for both ROS versions:
+## Конфигурация
 
-- **`process_topics`** runs online: it subscribes to the LiDAR and IMU topics and
-  processes messages as they arrive. Use it with a live sensor or alongside
-  `rosbag play`.
-- **`process_bag`** reads a recorded bag directly and pushes its messages through
-  the pipeline as fast as they can be processed. This is the preferred choice for
-  offline evaluation and reproducing results. This fork can also throttle it to
-  real time for visualization — see [Replay controls](#replay-controls).
+Конфигурация разнесена по двум YAML-файлам, оба читаются напрямую через yaml-cpp, а не
+через параметры ROS:
 
-In the commands below, replace `<sensor_config>` with one of the provided configs
-(see [Configuration](#configuration)) or your own. Add `rviz:=true` to bring up
-the visualization.
+- **`config/params.yaml`** - параметры алгоритма (разрешение карты, семплирование,
+  оптимизация, инерциальное окно). Не зависят от набора данных, значения по умолчанию
+  проверены на разных сенсорах и платформах.
+- **`config/sensor_configs/<name>.yaml`** - параметры конкретного набора сенсоров: имена
+  топиков, калибровка LiDAR→IMU, рабочий диапазон дальностей + оверрайды для `params.yaml`. 
 
-<details>
-<summary><b>ROS1</b></summary>
-<br>
 
-Process live topics:
+### Настройки сенсоров
 
-```bash
-roslaunch bievr_lio_ros process_topics.launch sensor_config:=<sensor_config>
-```
+| Ключ | Назначение |
+| --- | --- |
+| `topics.pointcloud` / `topics.imu` | Топики облака и IMU |
+| `calibration.translation` / `.rotation` | `T_IMU_LIDAR` (LiDAR → IMU): смещение и матрица поворота 3×3 построчно |
+| `lidar.min_range_m` / `lidar.max_range_m` | Рабочий диапазон дальности |
 
-Replay a rosbag:
+### Параметры алгоритма
 
-```bash
-roslaunch bievr_lio_ros process_bag.launch sensor_config:=<sensor_config> rosbag:=/path/to/bag.bag
-```
-</details>
+| Ключ | По умолчанию | Назначение |
+| --- | --- | --- |
+| `map.pixel_size_m` | 0.05 | Сторона пикселя bump-изображения [м] |
+| `map.voxel_size_m` | 0.5 | Сторона вокселя [м] |
+| `map.normal_tolerance_deg` | 3 | Порог изменения нормали, после которого содержимое вокселя пересчитывается |
+| `map.smooth` / `map.weighted` | — | Сглаживание изображения вокселя; взвешенное обновление пикселей |
+| `map.max_size` | 5000000 | Максимальное число вокселей в карте (LRU-вытеснение) |
+| `map.frame` | `odom` | Родительская система координат публикуемых поз и облаков |
+| `preprocess.downsample_resolution_m` | 0.15 | Разрешение прореживания входного скана [м] |
+| `preprocess.informed_sampling` | false | Отбор точек по «информативности» вокселей вместо равномерного прореживания |
+| `preprocess.informed_sample_count` | 300 | Сколько вокселей остаётся в полном разрешении при `informed_sampling` |
+| `optimization.huber_delta` | 100 | Порог функции Хубера в регистрации |
+| `optimization.img_residual` / `.img_jacobian` | true | Использовать bump-изображение в невязке и в якобиане |
+| `imu.window_s` | 10 | Длина инерциального окна оптимизации [с] |
+| `imu.t_init` | 0.2 | Время оценки смещений и вектора силы тяжести на старте [с] |
+| `imu.normalized` | -1 | Единицы акселерометра: `<0` — автоопределение, `0` — м/с², `>0` — g (множитель) |
+| `imu.frame` | — | Дочерняя система координат публикуемой одометрии |
+| `max_num_threads` | 0 | 0 — по числу ядер |
 
-<details>
-<summary><b>ROS2</b></summary>
-<br>
+`config/params.yaml` часть из параметров переопределяет. 
 
-Process live topics:
+`pixel_size_m` — основной параметр по памяти. Оптимальное значение зависит от
+плотности исходного облака: на плотной карте, построенной самим BIEVR, выигрывает
+мелкий пиксель (0.025–0.05), на разреженной сконвертированной — крупный (0.1). Значение
+`preprocess.downsample_resolution_m` следует менять вместе с ним. `voxel_size_m: 0.5`
+устойчиво и менять его обычно не требуется.
 
-```bash
-ros2 launch bievr_lio_ros2 process_topics.launch.py sensor_config:=<sensor_config>
-```
+### Отладочные параметры
 
-Replay a rosbag2 directory:
+| Ключ | Назначение |
+| --- | --- |
+| `debug.trajectory_path` | Директория для сохранения траектории в формате TUM (`t x y z qx qy qz qw`) |
+| `debug.map_save_path` | Директория для сохранения `<path>.pcd` и `<path>.bumpmap` |
+| `debug.accumulated_map_save_path` | Директория для сохранения `<path>.pcd`: объединение сырых сканов лидара вдоль траектории. Существенно больше по памяти |
+| `debug.accumulated_map_leaf_m` | Размер вокселя для него (по умолчанию 0.05); `<= 0` — сохранять все точки |
+| `debug.diagnostics_path` | Директория для сохранения диагностики солвера в CSV, по строке на каждый скан |
+| `debug.publish_map_stride` | Если стоит, публикует для визуализации разово загруженную карту в `points/map` (каждую N-ю точку для экономии ресурсов); `0` — выключено |
+| `debug.publish_all_clouds` | Публиковать промежуточные облака (`points/fine`, `points/coarse`, `points/effective`, `points/undistorted`) |
+| `debug.timing` / `debug.log` | Тайминги и подробный лог |
+| `debug.dashboard` / `debug.dashboard_ascii_path` | Живой статус в консоли (позиция, смещения, тайминги) |
 
-```bash
-ros2 launch bievr_lio_ros2 process_bag.launch.py sensor_config:=<sensor_config> rosbag:=/path/to/bag_dir
-```
-</details>
+Пустая строка в любом из путей означает «не сохранять».
 
-## Configuration
+### Свои данные
 
-The configuration is split in two files:
+Скопируйте один из готовых сенсорных конфигов в
+`config/sensor_configs/<имя>.yaml` и задайте `topics.*`, `calibration` и диапазон
+дальностей. Параметры алгоритма обычно остаются без изменений.
 
-- **`config/params.yaml`**: Algorithm parameters (map resolution, sampling,
-  optimization, IMU window, ...). These are dataset-independent and **typically do
-  not need to be adjusted**: the defaults have been validated across a wide range
-  of sensors, platforms, and environments.
-- **`config/sensor_configs/<name>.yaml`**: Per-dataset / per-sensor settings:
-  the LiDAR and IMU topic names, the LiDAR→IMU extrinsic calibration, and the
-  LiDAR min/max range.
+Готовые конфиги:
 
-Select a sensor config at launch with `sensor_config:=<name>`, which resolves to
-`config/sensor_configs/<name>.yaml` (an absolute path starting with `/` is used
-verbatim, so configs may also live outside the package). Likewise `params:=<name>`
-(default `params`) selects `config/<name>.yaml`.
-
-<details>
-<summary><b>Provided datasets</b></summary>
-<br>
-
-We provide ready-to-use sensor configs for the following public datasets:
-
-| Config | Dataset |
-|--------|---------|
+| Конфиг | Данные |
+| --- | --- |
+| `nora` | Два смердженных HAP Норникеля |
+| `gamma`, `geode`, `geode_alpha` | [GEODE](https://thisparticle.github.io/geode), устройства γ (Livox Avia) и α |
 | `enwide` | [ENWIDE](https://projects.asl.ethz.ch/datasets/enwide/) |
 | `ncd` | [Newer College Dataset](https://drive.google.com/drive/u/0/folders/1uR476FzjN3PfAiCknVKtuZi3_QfVvSdA) |
-| `gamma` | [GEODE](https://thisparticle.github.io/geode) |
 | `mars` | [MARS-LVIG](https://mars.hku.hk/dataset.html) |
 | `grandtour` | [GrandTour](https://grand-tour.leggedrobotics.com/) |
-</details>
 
-<details>
-<summary><b>Running on your own data</b></summary>
-<br>
+## Запуск
 
-To run BIEVR-LIO on a new sensor or dataset, copy one of the provided sensor
-configs to `config/sensor_configs/<your_name>.yaml` and adjust:
+Две ноды, обе принимают одни и те же конфиги:
 
-- `topics.pointcloud` / `topics.imu` : The topic names in your data.
-- `calibration` : the `T_IMU_LIDAR` extrinsic (LiDAR → IMU) rotation and
-  translation for your setup.
-- `lidar.min_range_m` / `lidar.max_range_m` : the usable range of your LiDAR.
+- **`process_topics`** - подписывается на топики LiDAR и IMU и обрабатывает сообщения по
+  мере поступления. Для live сенсоров.
+- **`process_bag`** - читает bag напрямую и прогоняет его настолько быстро, насколько
+  позволяет железо, без DDS и потерь сообщений. Предпочтительный вариант для
+  офлайн-обработки.
 
-The algorithm parameters in `params.yaml` can usually be left at their defaults.
-</details>
+### Маппинг
 
-# Map saving and localization (fork)
+```bash
+# топики
+ros2 launch bievr_lio_ros2 process_topics.launch.py sensor_config:=<sensor_config>
 
-Upstream BIEVR-LIO is pure odometry: the map lives and dies with the process.
-This fork can write that map to disk, load it back, and register against it with
-updates disabled — i.e. localize in a previously built map. All of it is driven
-from the same YAML files described above; no new command-line interface.
+# запись
+ros2 launch bievr_lio_ros2 process_bag.launch.py \
+  sensor_config:=<sensor_config> rosbag:=/path/to/bag_dir
+```
 
-## Saving a map
+Чтобы получить карту на выходе, задайте `debug.map_save_path` - иначе карта существует
+только на время работы процесса. Добавьте `rviz:=true` для визуализации.
 
-Set a save path in the `debug` section (of `params.yaml`, or of the sensor config,
-which wins on a per-leaf basis):
+### Локализация в готовой карте
 
-| Key | Meaning |
-|---|---|
-| `debug.map_save_path` | Writes `<path>.pcd` and `<path>.bumpmap` when the bag/stream ends. Empty = off. |
-| `debug.accumulated_map_save_path` | Writes `<path>.pcd`: the union of the raw registered scans, voxel-downsampled, with real LiDAR intensity. Much larger; independent of the bump map. |
-| `debug.accumulated_map_leaf_m` | Leaf size for that downsample (default `0.05`). `<= 0` keeps every point. |
-| `debug.trajectory_path` | TUM trajectory (`t x y z qx qy qz qw`). |
-
-`<path>.pcd` is a binary PCD reconstructed from the BIEVR map — one point per valid
-bump-image pixel, `intensity` = that pixel's accumulated weight. `<path>.bumpmap`
-is the map itself (oriented voxel poses + bump images), which is what you load
-back.
-
-## Localizing in a saved map
-
-Add a `map.load_path` and turn updates off:
+Карта загружается с диска, её обновление выключается:
 
 ```yaml
 map:
   load_path: "/path/to/mine.bumpmap"
-  update: False                 # freeze: no scan is ever integrated
-  initial_pose: [0, 0, 0, 0, 0, 0, 1]   # optional; [x, y, z, qx, qy, qz, qw]
-  publish_map_stride: 10        # see below (lives under debug:)
+  update: False                          # ни один скан не интегрируется
+  initial_pose: [0, 0, 0, 0, 0, 0, 1]    # опционально; [x, y, z, qx, qy, qz, qw]
+
+debug:
+  publish_map_stride: 10                 # показать карту в RViz
 ```
 
-| Key | Meaning |
-|---|---|
-| `map.load_path` | Native `.bumpmap` to load at startup. Empty = build a map from scratch (upstream behaviour). |
-| `map.update` | `False` freezes the map: registration still runs, but nothing is integrated. Defaults to `True`. |
-| `map.initial_pose` | Start pose `T_W_I` **in the loaded map's frame**, TUM order (`w` last). Absent = start at the origin with the gravity-aligned attitude from bias initialization — which is what replaying the mapping run itself wants. |
-| `debug.publish_map_stride` | Publish the loaded map once on `points/map` (world frame, latched), keeping every N-th point, so RViz can show what you are localizing against. `0` = off. |
+| Ключ | Назначение |
+| --- | --- |
+| `map.load_path` | Путь к `.bumpmap`.  |
+| `map.update` | `False` - карта заморожена: новые точки не интегрируются |
+| `map.initial_pose` | Стартовая поза `T_W_I` **в системе координат загруженной карты**, порядок TUM (`w` последним). Без неё старт из начала координат с ориентацией по силе тяжести - сработает только если бэг локализации и маппинга совпадают |
+| `debug.publish_map_stride` | Публикация загруженной карты в `points/map` (latched, каждая N-я точка) |
 
-Loading is strict by design — a localization run that silently fell back to
-mapping would look like a success. 
 
-Two properties worth knowing:
+### Конвертация облака в карту
 
-- **Only `roll`/`pitch` of `initial_pose` are checked.** They are observable from
-  gravity, so the pipeline warns when the configured attitude disagrees with the
-  measured one by more than 5°. Yaw and position are free.
-- **A loaded map cannot correctly resume mapping.** `outer_sum_` (the second
-  moment used to re-estimate voxel normals) is not serialized, so `update: True`
-  together with `load_path` is a debugging combination, not a lifelong-mapping
-  mode.
-
-Bias initialization still assumes the platform is **stationary** at the start.
-Starting mid-run (see `start_offset_s` below) works — registration against the
-frozen map pulls the estimate in within a few seconds — but the initial biases and
-attitude will be poor if the platform is moving.
-
-## Replay controls
-
-`process_bag` gained three optional arguments, all off by default. They are available both as launch arguments and
-directly on the node:
-
-| Argument | Meaning |
-|---|---|
-| `max_scans:=N` | Stop after N point clouds. The bag is then closed and the map/trajectory saved through the normal path, so short smoke runs still exercise the export. |
-| `start_offset_s:=S` | Drop the first S seconds of the bag. With `map.initial_pose` this starts a localization run in the middle of a map. |
-| `rate:=R` | Throttle replay to R× real time (`1` = wall clock). `0` = as fast as the hardware allows. |
+`bumpmap_from_pcd` строит `.bumpmap` из уже готового облака точек (например. карты из другого SLAM-алгоритма). 
 
 ```bash
-# watch a localization run in real time, starting 300 s into the bag
+./install/bievr_lio/bin/bumpmap_from_pcd \
+  --input /path/to/cloud.pcd \
+  --output-dir /path/to/out \
+  --config config/params.yaml \
+  --sensor-config config/sensor_configs/<name>.yaml
+```
+
+| Аргумент | Назначение |
+| --- | --- |
+| `--input PATH` | Входное облако, PCD (ascii / binary / binary_compressed) или PLY. Можно указать несколько раз для мерджа нескольких облаков |
+| `--output-dir DIR` | Каталог результата: `map.bumpmap`, `map.pcd` и `.run_config/sensor.yaml` |
+| `--config PATH` | `params.yaml`; `map.voxel_size_m` и `map.pixel_size_m` отсюда задают геометрию выходной карты |
+| `--sensor-config PATH` | Строго говоря не нужен, но полезно для оверрайдов |
+| `--override K=V` | Точечное переопределение по составному ключу, например `map.voxel_size_m=0.25`. Повторяемый, значение разбирается как YAML. Добавлено, чтобы прогонять подборы параметрво в скриптах |
+| `--chunk-size N` | Число точек на один вызов интеграции (по умолчанию 2000000) |
+| `--stride N` | Брать каждую N-ю точку после конкатенации — для быстрых прикидок |
+
+Выходной каталог по структуре совпадает с результатом обычного прогона маппинга,
+поэтому все остальные инструменты работают с ним без изменений.
+
+Два момента, которые влияют на результат:
+
+- `--chunk-size` влияет на результат. Нормали вокселей считаются по суммам, не зависящим от
+  порядка, а вот bump-изображение накапливается инкрементально и перепроецируется, как
+  только нормаль вокселя сдвинулась больше `map.normal_tolerance_deg`. Разный размер
+  чанка даёт слегка разные изображения.
+- Веса пикселей однородные. В накопленном облаке нет ни положения сенсора, ни
+  времени точки, поэтому дальности в интеграцию не передаются, и `intensity` в
+  выходном `map.pcd` не в той же шкале, что у карты, построенной онлайн.
+
+Геометрия карты, с которой её потом будут загружать, должна совпадать: `importMap`
+отклоняет расхождение `voxel_size_m` / `pixel_size_m` 
+
+### Управление воспроизведением
+
+`process_bag` принимает три необязательных аргумента, доступных и как аргументы
+launch-файла, и напрямую у узла:
+
+| Аргумент | Назначение |
+| --- | --- |
+| `max_scans:=N` | Остановиться после N облаков. Bag после этого закрывается штатно, карта и траектория сохраняются обычным путём — короткий прогон тоже проверяет выгрузку |
+| `start_offset_s:=S` | Пропустить первые S секунд записи. Вместе с `map.initial_pose` даёт старт локализации с середины карты |
+| `rate:=R` | Ограничить скорость воспроизведения до R× реального времени (`1` — по стенным часам). `0` — настолько быстро, насколько позволяет железо |
+
+```bash
+# локализация в реальном времени, старт на 300-й секунде записи
 ros2 launch bievr_lio_ros2 process_bag.launch.py \
   sensor_config:=<sensor_config> rosbag:=/path/to/bag_dir \
   rate:=1 start_offset_s:=300 rviz:=true rviz_config:=localization
 ```
 
-`rviz_config:=localization` opens `rviz/localization.rviz` (frozen map in grey,
-the live registered scan on top, pose axes) instead of the mapping view
+`rviz_config:=localization` открывает `rviz/localization.rviz` (замороженная карта
+серым, поверх неё живой зарегистрированный скан, оси позы) вместо вида для маппинга
 `rviz/config.rviz`.
 
-## The `.bumpmap` format
+## ROS-интерфейс
 
-A binary dump of the observed voxels: a header (magic, version, voxel size, pixel
-size, voxel count) followed by one record per voxel — the two voxel poses, the
-centroid and normal, the point count, the row-major `bump_img` / `bump_weights`
-matrices, the integer `voxel_index` (the hash key) and `bump_smoothed`.
+Все топики публикуются в пространстве имён `bievr_lio`.
 
-Storing `bump_smoothed` rather than re-deriving it on load matters because the
-registration samples that image **exclusively**; a map loaded without it would
-register against all zeros. Storing `voxel_index` makes the hash key explicit
-instead of re-deriving it from the centroid.
+| Топик | Тип | Условие |
+| --- | --- | --- |
+| `/bievr_lio/odom` | `nav_msgs/msg/Odometry` | всегда; `map.frame` → `imu.frame` |
+| `/bievr_lio/points/registered` | `sensor_msgs/msg/PointCloud2` | всегда; скан в системе координат карты |
+| `/bievr_lio/bias/acc`, `/bievr_lio/bias/gyro` | `geometry_msgs/msg/Vector3Stamped` | всегда |
+| `/bievr_lio/diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | всегда; те же величины, что и в CSV |
+| `/bievr_lio/points/map` | `sensor_msgs/msg/PointCloud2` | `debug.publish_map_stride > 0`, один раз, latched |
+| `/bievr_lio/points/fine`, `points/coarse`, `points/effective`, `points/undistorted` | `sensor_msgs/msg/PointCloud2` | `debug.publish_all_clouds` |
 
-Python tooling in `scripts/`:
+Дополнительно публикуется TF `map.frame` → `imu.frame`.
 
-| Script | Use |
-|---|---|
-| `load_bumpmap.py MAP` | Parse a dump; `load_bumpmap()` for small maps, `iter_bumpmap()` to stream large ones. |
-| `compare_bumpmap.py A B` | Order-insensitive diff, keyed on voxel index (export order is hash-map insertion order, so a re-export need not match line for line). Exit 1 on any difference. |
-| `view_map.py` | Quick visualization. |
+## Диагностика
 
-## Fork datasets and runners
+При заданном `debug.diagnostics_path` пишется CSV по строке на скан. Те же величины
+уходят в `/bievr_lio/diagnostics`. CSV остаётся основным источником при офлайн-прогонах, так как они идутт быстрее, чем любой подписчик успевает читать.
 
-Additional sensor configs beyond the upstream table:
+| Колонка | Смысл |
+| --- | --- |
+| `t` | Временная метка скана |
+| `effective_points`, `downsampled_points`, `ratio` | Точек, вошедших в решение; точек после прореживания; их отношение |
+| `residual` | Средний модуль point-to-plane residual. **`-1`, если ни одна точка не вошла в решение**, — потеря захвата не усредняется в ноль |
+| `inlier_points`, `no_correspondence` | Инлайеры и точки, для которых не нашлось соответствия |
+| `huber_cost`, `iterations`, `converged`, `lm_lambda` | Состояние солвера |
+| `lambda_min_6`, `kappa_6`, `lambda_min_3`, `kappa_3` | Минимальное собственное число и число обусловленности информационной матрицы: полной 6×6 и её трансляционного блока 3×3 |
+| `speed`, `pos_*`, `roll`, `pitch`, `yaw` | Состояние оценки |
 
-| Config | Data |
-|---|---|
-| `geode` | GEODE metro-tunnel sequences, device γ (Livox Avia) |
-| `geode_alpha` | GEODE urban-tunnel sequences, device α |
-| `nora` | RT-Autonomy mining truck, dual Livox HAP merged into one cloud (both extrinsics identity, since the merged cloud and the IMU share a frame) |
 
-Two helper scripts drive whole runs, assembling a per-run config next to the
-output so what was run stays inspectable:
 
-- **`run_bievr_container.sh [sequence]`** — GEODE sequences in the
-  `bievr_lio_ros2` Docker image.
-- **`run_bievr_nora.sh [bag_dir]`** — the truck bags, **built and run natively**
-  (the Docker image builds BIEVR from a GitHub clone, so it would not contain
-  local changes). Mapping by default; `MAP_LOAD=<map.bumpmap>` switches it to
-  localization. Other knobs: `OUT_DIR`, `MAX_SCANS`, `START_OFFSET_S`,
-  `INITIAL_POSE`, `RATE`, `MAP_STRIDE`, `MAP_SAVE`, `SENSOR_CONFIG`, `IMU_TOPIC`,
-  `BUILD=0`, `RVIZ=1` (which implies `RATE=1` and, in localization mode, publishing
-  the map).
+### Утилиты
 
-```bash
-./run_bievr_nora.sh                                              # map a bag
-MAP_LOAD=<out>/map.bumpmap RVIZ=1 ./run_bievr_nora.sh            # localize, watch it
-```
+| Скрипт | Назначение |
+| --- | --- |
+| `scripts/load_bumpmap.py MAP` | Разбор выгрузки: `load_bumpmap()` для небольших карт, `iter_bumpmap()` для потокового чтения больших |
+| `scripts/compare_bumpmap.py A B` | Сравнение двух карт по ключам вокселей, без учёта порядка записей (порядок экспорта — порядок вставки в хеш-таблицу, поэтому повторный экспорт не обязан совпадать построчно). Код возврата 1 при любом различии |
+| `scripts/view_map.py PATH` | Визуализация `.bumpmap` или `.pcd`: режимы `quads` (каждый пиксель — реальный квадрат в плоскости своего вокселя), `points`, `patches`; раскраска `bump`/`bump_raw`/`height`/`weight`, `--crop X,Y,Z,R`, выгрузка в `.ply` через `--save`. Требует Open3D |
 
-# Acknowledgements
-We thank the authors of [DLIO](https://github.com/vectr-ucla/direct_lidar_inertial_odometry), [Wavemap](https://github.com/ethz-asl/wavemap) and [UGPM](https://github.com/UTS-RI/ugpm) for open-sourcing their works that served as an inspiration for us.
-We used [ascii-image-converter](https://github.com/TheZoraiz/ascii-image-converter) for our ascii art.
+## Благодарности
 
-# Citation
+Алгоритм и исходная реализация — [BIEVR-LIO](https://github.com/ethz-asl/BIEVR-LIO),
+ETH Zurich Autonomous Systems Lab. Авторы благодарят за открытые публикации
+[DLIO](https://github.com/vectr-ucla/direct_lidar_inertial_odometry),
+[Wavemap](https://github.com/ethz-asl/wavemap) и
+[UGPM](https://github.com/UTS-RI/ugpm), послужившие источником идей, а также
+[ascii-image-converter](https://github.com/TheZoraiz/ascii-image-converter).
 
-Please cite our work if you are using BIEVR-LIO in your research.
-  ```bibtex
+
+```bibtex
 @article{pfreundschuh2026bievr,
   title        = {BIEVR-LIO: Robust LiDAR-Inertial Odometry through Bump-Image-Enhanced Voxel Maps},
   author       = {Pfreundschuh, Patrick and Tuna, Turcan and {Le Gentil}, Cedric and Siegwart, Roland and Cadena, Cesar and Oleynikova, Helen},
   year         = 2026,
   journal      = {Robotics: Science and Systems},
 }
-  ```
+```
+
+## Лицензия
+
+BSD-3-Clause, см. [LICENSE](LICENSE).

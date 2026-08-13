@@ -69,6 +69,8 @@ _ALPHA_T = np.array([0.0090, -0.2925, 0.4533])
 GT_FILES = {
     "tunnel1": "Tunneling_tunnel1.txt",
     "tunnel2": "Tunneling_tunnel2.txt",
+    "tunnel3": "Tunneling_tunnel3.txt",
+    "tunnel4": "Tunneling_tunnel4.txt",
     "shield1": "Shield_tunnel1.txt",
     "shield5": "Shield_tunnel5.txt",
     "urban_tunnel2": "Urban_Tunnel02.txt",
@@ -77,6 +79,8 @@ GT_FILES = {
 SEQ_DATASET_ROOT = {
     "tunnel1": DATASET_ROOT_METRO,
     "tunnel2": DATASET_ROOT_METRO,
+    "tunnel3": DATASET_ROOT_METRO,
+    "tunnel4": DATASET_ROOT_METRO,
     "shield1": DATASET_ROOT_METRO,
     "shield5": DATASET_ROOT_METRO,
     "urban_tunnel2": DATASET_ROOT_URBAN,
@@ -88,6 +92,8 @@ SEQ_DATASET_ROOT = {
 SEQ_SENSOR_CONFIG = {
     "tunnel1": "geode.yaml",
     "tunnel2": "geode.yaml",
+    "tunnel3": "geode.yaml",
+    "tunnel4": "geode.yaml",
     "shield1": "geode.yaml",
     "shield5": "geode.yaml",
     "urban_tunnel2": "geode_alpha.yaml",

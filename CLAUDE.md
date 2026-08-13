@@ -183,7 +183,7 @@ what `nora_loc/sweep_bievr_loc.sh` uses.
   (found 2026-08-06). Every nora map on the drive is v2. Re-run the sequence to
   get a readable GEODE bumpmap.
 - **Ground surfaces and roughness come out of the map with no C++ change** —
-  `analysis/terrain.py` (`roughness`, `ground`) streams the v2 file through
+  `map_processor/terrain.py` (`roughness`, `ground`) streams the v2 file through
   `scripts/load_bumpmap.py`. Roughness is `std(bump_img)` per voxel, the one
   bump statistic invariant to both the arbitrary normal sign and the arbitrary
   plane offset, so none of the `view_map.py` normalization is needed. **Read F10

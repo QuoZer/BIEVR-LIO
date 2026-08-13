@@ -1,0 +1,55 @@
+# GEODE alpha device (Velodyne VLP-16 + 100 Hz IMU), sequence `urban_tunnel2`.
+# Derived from geode.yaml (gamma / Livox AVIA), but alpha's IMU is NOT
+# co-located with the LiDAR the way gamma's is, so the calibration block below
+# is a real, non-identity extrinsic (see below).
+
+topics:
+  pointcloud: "/velodyne_points"
+  imu: "/imu/data"
+
+# T_IMU_LIDAR (LiDAR -> IMU): p_imu = T_IMU_LIDAR . p_lidar.
+# BIEVR's config_loader.h reads this block straight into `T_I_L` and
+# pipeline.cpp applies it as transformPoints(T_I_L, points_L) i.e. exactly
+# p_imu = T_I_L . p_lidar -- same convention as GEODE_dataset's own
+# T_IMU_LiDAR, so no inversion is needed (confirmed by reading
+# BIEVR/src/pipeline.cpp:76 and BIEVR/include/bievr_lio/config_loader.h:306-311,
+# not guessed).
+#
+# Source: GEODE_dataset/cali/alpha_config.yaml (brief §2):
+#   R = [[ 0.9999,  0.0049,  0.0153],
+#        [-0.0050,  1.0000,  0.0021],
+#        [-0.0153, -0.0022,  0.9999]]
+#   t = [0.0961, -0.1338, 0.3032]
+# R above is only ~4-decimal orthogonal (||R^T R - I|| ~= 1.3e-4); re-orthonormalised
+# via SVD (R_ortho = U @ Vt, det checked == +1) before use here, since BIEVR
+# consumes this matrix directly as a rotation with no internal renormalisation.
+# The 0.303 m z lever arm is the dominant term -- unlike gamma this is NOT
+# negligible (see eval_geode.py --body-frame lidar/imu for how it's resolved).
+calibration:
+  translation: [0.0961, -0.1338, 0.3032]
+  rotation: [ 0.99987070,  0.00493353,  0.01530502,
+             -0.00496643,  0.99998544,  0.00211234,
+             -0.01529437, -0.00218808,  0.99988064]
+
+lidar:
+  # VLP-16: 16 beams, ~95 m measured max range (brief SS2), vs. AVIA's 200 m.
+  # max_range_m rounded up to 100 to match this repo's convention for other
+  # ~100 m-class sensors (ncd.yaml / enwide.yaml, both Ouster).
+  min_range_m: 2.0   # VLP-16 near-range self/mount returns; gamma's 0.5 m assumes AVIA's shorter blind zone
+  max_range_m: 100    # measured max ~95 m
+
+# NOTE on map/preprocess params (deliberately left at params.yaml defaults):
+# VLP-16 has far sparser VERTICAL beam spacing than every sensor this repo's
+# configs were validated on (16 rings @ ~2 deg vs. 64-128-beam Ouster/Hesai in
+# ncd/enwide/grandtour, or AVIA's non-repetitive fill-in pattern in gamma) --
+# e.g. adjacent-ring vertical spacing exceeds the 0.5 m map voxel_size_m beyond
+# ~14 m range. We considered coarsening map.voxel_size_m / pixel_size_m to
+# compensate, but did NOT: within a single scan, azimuthal sampling along one
+# ring is dense (1800 cols/rev -> ~0.1-0.2 m spacing at 30-60 m range), which is
+# what actually populates a given voxel's bump image for planar surfaces
+# (tunnel walls/road), so the vertical sparsity is less limiting than it first
+# appears; and per README the map/preprocess defaults are stated to be
+# dataset-independent and validated broadly. Guessing new numbers with no
+# measured basis here would be exactly the kind of after-the-fact tuning the
+# brief asks us not to do. Flagged for follow-up if the run shows map
+# starvation (voxels never reaching kNMinValid=4 observed points).
