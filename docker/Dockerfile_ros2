@@ -15,8 +15,9 @@ RUN apt-get update && apt-get install -y sudo && rm -rf /var/lib/apt/lists/* \
  && useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash ${USERNAME} \
  && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
 
-# Copy scripts folder
-COPY scripts/ /home/${USERNAME}/scripts/
+# Build context is the repo root (see run_docker_ros2.sh), so paths below are
+# rooted there.
+COPY docker/scripts/ /home/${USERNAME}/scripts/
 WORKDIR /home/${USERNAME}/
 RUN chmod a+x -R /home/${USERNAME}/scripts \
  && chown -R ${USER_ID}:${GROUP_ID} /home/${USERNAME}
@@ -32,8 +33,12 @@ RUN scripts/install_deps_ros2.sh
 # search path, so no Ceres_DIR / CMAKE_PREFIX_PATH is required.
 RUN scripts/install_ceres.sh
 
+# Bring in the local working copy of BIEVR-LIO itself, so the image always
+# builds from what's on disk rather than cloning from GitHub.
+COPY --chown=${USER_ID}:${GROUP_ID} . ${COLCON_WS}/src/BIEVR-LIO
+
 # Switch to the non-root user to build the workspace into their home.
 # uid=1000 lets the non-root user read the forwarded SSH agent socket for the
-# git clone; keep it in sync with USER_ID above (or switch the clones to HTTPS).
+# Livox driver clones (or switch those to HTTPS).
 USER ${USERNAME}
 RUN --mount=type=ssh,uid=1000 scripts/build_ros2.sh

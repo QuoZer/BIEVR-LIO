@@ -40,11 +40,6 @@ source /opt/ros/jazzy/setup.bash
 cd $COLCON_WS
 colcon build --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=jazzy --packages-select livox_ros_driver2
 
-cd $COLCON_WS/src
-
-# Clone BIEVR-LIO
-git clone https://github.com/QuoZer/BIEVR-LIO.git
-
-cd $COLCON_WS
-# Build it!!
+# Build it! BIEVR-LIO itself is already at src/BIEVR-LIO, copied in from the
+# local checkout by the Dockerfile.
 colcon build --packages-up-to bievr_lio_ros2
