@@ -78,7 +78,14 @@ what `nora_loc/sweep_bievr_loc.sh` uses.
 
 - `config/sensor_configs/nora.yaml` — `/merged_scan` + a HAP IMU topic; **both
   extrinsics identity** (one merged frame — *not* `body_calibration.json`);
-  `min_range_m: 1.0` drops exactly the range-0 invalids. The IMU topic differs
+  **`min_range_m: 1.2`** (was 1.0, raised 2026-08-13) — 1.0 drops exactly the
+  range-0 invalids but leaves each HAP registering the *other* at ±1.1135 m as
+  world geometry. 1.2 removes 95.7 % of that and costs 0.19 % of the
+  accumulated cloud. ⚠️ It also moves the trajectory by **0.79 m mean / 3.02 m
+  max** over 1675 m — the same magnitude as the `min_range_m 0.0` (0.665 m) and
+  `max_range_m 100` (0.693 m) probes below, so the two maps are **not in one
+  frame** and no grid metric compares across them.
+  `docs/experiments/2026-08-13-self-return-remap.md`. The IMU topic differs
   per bag (`/merged_imu` full bag, `/livox/imu_10_0_0_50` on the 150–750 slice),
   so the runner reads it from `metadata.yaml`. Finding **F04**'s g-vs-m/s² is
   handled by BIEVR itself: *"autodetected IMU as normalized (mean |acc| =
